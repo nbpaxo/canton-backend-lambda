@@ -50,6 +50,16 @@ export const PARTIES = {
     || `DSO::1220be58c29e65de40bf273be1dc2b266d43a9a002ea5b18955aeef7aac881bb471a`,
 } as const;
 
+// ─── Instrument config (devnet=Amulet/CC; testnet swaps to USDCx) ───────
+// The Daml-side instrument id + admin party govern which on-chain
+// Holdings/Transfers we recognize. The symbol + decimals are purely
+// display — surfaced via /me so the frontend doesn't carry its own env.
+export const INSTRUMENT_ID = process.env.INSTRUMENT_ID || 'Amulet';
+export const INSTRUMENT_SYMBOL = process.env.INSTRUMENT_SYMBOL || 'CC';
+export const INSTRUMENT_DECIMALS = Number(process.env.INSTRUMENT_DECIMALS || 10);
+export const INSTRUMENT_ADMIN_PARTY_ID = process.env.INSTRUMENT_ADMIN_PARTY_ID
+  || 'DSO::1220be58c29e65de40bf273be1dc2b266d43a9a002ea5b18955aeef7aac881bb471a';
+
 // CORS allowed origins
 export const CORS_ORIGINS = (process.env.CORS_ORIGINS
   || 'http://localhost:3000,http://localhost:5173,https://testnet.mperps.xyz').split(',');

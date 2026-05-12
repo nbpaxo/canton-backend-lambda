@@ -13,6 +13,12 @@
 import { Router, Request, Response } from 'express';
 import { requireAuth, type AuthenticatedRequest } from '../auth.js';
 import { getPool } from '../db/pool.js';
+import {
+  INSTRUMENT_ADMIN_PARTY_ID,
+  INSTRUMENT_DECIMALS,
+  INSTRUMENT_ID,
+  INSTRUMENT_SYMBOL,
+} from '../config.js';
 
 const router = Router();
 
@@ -101,6 +107,15 @@ router.get('/me', requireAuth, async (req: Request, res: Response) => {
     status: userRow.status,
     createdAt: userRow.created_at.toISOString(),
     kyc,
+    // Instrument config — frontend reads these and renders accordingly. On
+    // testnet we'll swap to {id: 'USDCx', symbol: 'USDCx', decimals: 6,
+    // admin: <Circle's party>} via env; no frontend code changes needed.
+    instrument: {
+      id: INSTRUMENT_ID,
+      symbol: INSTRUMENT_SYMBOL,
+      decimals: INSTRUMENT_DECIMALS,
+      admin: INSTRUMENT_ADMIN_PARTY_ID,
+    },
   });
 });
 

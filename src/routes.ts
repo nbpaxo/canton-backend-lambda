@@ -16,12 +16,9 @@
 import { Router, Request, Response } from 'express';
 import { requireAuth, type AuthenticatedRequest } from './auth.js';
 import { canton } from './sdk.js';
+import { INSTRUMENT_ADMIN_PARTY_ID, INSTRUMENT_ID } from './config.js';
 
 const router = Router();
-
-const INSTRUMENT_ADMIN = process.env.INSTRUMENT_ADMIN_PARTY_ID
-  || 'DSO::1220be58c29e65de40bf273be1dc2b266d43a9a002ea5b18955aeef7aac881bb471a';
-const INSTRUMENT_ID = process.env.INSTRUMENT_ID || 'Amulet';
 
 // ─── Health ──────────────────────────────────────────────────────────────────
 router.get('/health', (_req: Request, res: Response) => {
@@ -33,7 +30,7 @@ router.get('/holdings', requireAuth, async (req: Request, res: Response) => {
   const { party } = (req as AuthenticatedRequest).user;
   try {
     const holdings = await canton.getUserHoldings(party, {
-      instrumentAdmin: INSTRUMENT_ADMIN,
+      instrumentAdmin: INSTRUMENT_ADMIN_PARTY_ID,
       instrumentId: INSTRUMENT_ID,
     });
     const totalBalance = holdings.reduce((s, h) => s + h.amount, 0);

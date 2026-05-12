@@ -20,6 +20,9 @@ import type { Pool } from 'pg';
 import { closePool, getPool } from '../db/pool.js';
 import {
   CANTON_LEDGER_API,
+  INSTRUMENT_ADMIN_PARTY_ID,
+  INSTRUMENT_ID,
+  INSTRUMENT_SYMBOL,
   KEYCLOAK_BASE,
   KEYCLOAK_REALM,
   KEYCLOAK_TOKEN_URL,
@@ -47,9 +50,6 @@ import { getOperatorToken } from '../canton-sdk/tokens.js';
 import { resolveOperatorCantonId } from '../canton-sdk/operator.js';
 
 const INTERVAL_MS = Number(process.env.WATCHER_INTERVAL_MS ?? 5_000);
-const INSTRUMENT_ADMIN = process.env.INSTRUMENT_ADMIN_PARTY_ID
-  || 'DSO::1220be58c29e65de40bf273be1dc2b266d43a9a002ea5b18955aeef7aac881bb471a';
-const INSTRUMENT_ID = process.env.INSTRUMENT_ID || 'Amulet';
 
 const sdkConfig: CantonSdkConfig = {
   cantonLedgerApi: CANTON_LEDGER_API,
@@ -81,7 +81,7 @@ async function main(): Promise<void> {
   log(`starting; polling every ${INTERVAL_MS}ms`);
   log(`  vaultPool : ${PARTIES.vaultPool}`);
   log(`  operator  : ${PARTIES.operator}`);
-  log(`  instrument: ${INSTRUMENT_ID} (admin ${INSTRUMENT_ADMIN.split('::')[0]}...)`);
+  log(`  instrument: ${INSTRUMENT_SYMBOL} (id=${INSTRUMENT_ID}, admin ${INSTRUMENT_ADMIN_PARTY_ID.split('::')[0]}...)`);
 
   const stopSignal = installStopSignal();
   while (!stopSignal.aborted) {
@@ -133,7 +133,7 @@ async function tick(pool: Pool): Promise<void> {
     const amount = String(view.amount ?? '0');
 
     if (owner !== PARTIES.vaultPool) { seenHoldingCids.add(c.contractId); continue; }
-    if (iid.admin !== INSTRUMENT_ADMIN || iid.id !== INSTRUMENT_ID) { seenHoldingCids.add(c.contractId); continue; }
+    if (iid.admin !== INSTRUMENT_ADMIN_PARTY_ID || iid.id !== INSTRUMENT_ID) { seenHoldingCids.add(c.contractId); continue; }
     if (view.lock) { seenHoldingCids.add(c.contractId); continue; } // locked holding (e.g. fee reserve) — skip
     if (Number(amount) <= 0) { seenHoldingCids.add(c.contractId); continue; }
 
@@ -255,7 +255,7 @@ async function tick(pool: Pool): Promise<void> {
               operator: PARTIES.operator,
               user: sender,
               amount,
-              instrumentAdmin: INSTRUMENT_ADMIN,
+              instrumentAdmin: INSTRUMENT_ADMIN_PARTY_ID,
               instrumentId: INSTRUMENT_ID,
               sourceTransferId: dedupKey,
               depositedAt: new Date().toISOString(),
