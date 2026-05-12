@@ -18,6 +18,7 @@ import {
   INSTRUMENT_DECIMALS,
   INSTRUMENT_ID,
   INSTRUMENT_SYMBOL,
+  PARTIES,
 } from '../config.js';
 
 const router = Router();
@@ -116,6 +117,9 @@ router.get('/me', requireAuth, async (req: Request, res: Response) => {
       decimals: INSTRUMENT_DECIMALS,
       admin: INSTRUMENT_ADMIN_PARTY_ID,
     },
+    // Deposit destination — users send to this party; the watcher detects
+    // and credits the deposit on chain.
+    vaultPool: PARTIES.vaultPool,
   });
 });
 
