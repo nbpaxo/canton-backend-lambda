@@ -1,37 +1,35 @@
 /**
- * Signup route — invite code based onboarding.
+ * Signup route — invite code based onboarding on our validator (devnet branch).
  *
- * Flow:
- *   1. Validate invite code (DynamoDB)
- *   2. Check username not taken (Keycloak)
- *   3. Create Canton party (POST /v2/parties)
- *   4. Create Keycloak user (admin API)
- *   5. Get Keycloak user UUID
- *   6. Create Canton user (link KC UUID → party)
- *   7. Grant CanActAs + CanReadAs
- *   8. Create VaultAccountProposal on Canton
+ * Flow (reordered from master so the Keycloak UUID is the party hint, per
+ * "user id in keycloak should be party id for user not name"):
+ *   1. Validate invite code (Postgres)
+ *   2. Check username not taken in Keycloak
+ *   3. Create Keycloak user → get UUID (this is the Canton `sub`)
+ *   4. Create Canton party with partyIdHint = UUID
+ *      → party_id is `<uuid>::<fingerprint>`
+ *      → user logs in with username/password, but their canonical identifier
+ *        on the ledger is the UUID-derived party id
+ *   5. Create Canton user (link UUID → party id)
+ *   6. Grant CanActAs + CanReadAs on the party
+ *   7. Upsert into our local `users` table (so /me + the watcher find them)
+ *   8. (deferred) VaultAccountProposal — new contract may not need this.
+ *      Kept as a no-op TODO until the new contract is confirmed.
  *   9. Mark invite code as redeemed
  */
 
 import { Router, Request, Response } from 'express';
-import { canton } from './sdk.js';
 import { getAdminToken } from './auth.js';
 import { getInviteCode, redeemInviteCode, listInviteCodes, type RedeemedByInfo } from './db.js';
+import { getPool } from './db/pool.js';
 import {
   CANTON_LEDGER_API,
   KEYCLOAK_BASE,
   KEYCLOAK_REALM,
   KEYCLOAK_CLIENT_ID,
   KEYCLOAK_CLIENT_SECRET,
-  PACKAGE_ID,
-  PARTIES,
   ADMIN_API_KEY,
 } from './config.js';
-import { getTemplateIds } from './canton-sdk/config.js';
-import { getOperatorToken } from './canton-sdk/tokens.js';
-import { submitCommand } from './canton-sdk/ledger.js';
-import { resolveOperatorCantonId } from './canton-sdk/operator.js';
-import { sdkConfig } from './sdk.js';
 
 const router = Router();
 
@@ -146,28 +144,7 @@ router.post('/signup', async (req: Request, res: Response) => {
       return;
     }
 
-    // 3. Create Canton party
-    const cantonAdminToken = await getAdminToken();
-    const partyRes = await fetch(`${CANTON_LEDGER_API}/v2/parties`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${cantonAdminToken}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ partyIdHint: username, identityProviderId: '' }),
-    });
-
-    const partyData = await partyRes.json() as any;
-    const partyId = partyData.partyDetails?.party;
-
-    if (!partyId) {
-      res.status(400).json({ error: 'Failed to create Canton party', details: partyData });
-      return;
-    }
-
-    console.log(`[signup] Canton party created: ${partyId}`);
-
-    // 4. Create Keycloak user
+    // 3. Create Keycloak user FIRST — we need its UUID as the Canton party hint.
     const kcCreateRes = await fetch(
       `${KEYCLOAK_BASE}/admin/realms/${KEYCLOAK_REALM}/users`,
       {
@@ -190,21 +167,44 @@ router.post('/signup', async (req: Request, res: Response) => {
       return;
     }
 
-    // 5. Get Keycloak user UUID
+    // 4. Get the Keycloak UUID — this is the user's `sub` claim AND will be
+    //    the partyIdHint on Canton, so party_id is `<uuid>::<fingerprint>`.
     const kcUserRes = await fetch(
       `${KEYCLOAK_BASE}/admin/realms/${KEYCLOAK_REALM}/users?username=${encodeURIComponent(username)}&exact=true`,
       { headers: { Authorization: `Bearer ${kcAdminToken}` } },
     );
     const kcUsers = (await kcUserRes.json()) as any[];
-    const kcUuid = kcUsers?.[0]?.id;
+    const kcUuid: string | undefined = kcUsers?.[0]?.id;
     if (!kcUuid) {
       res.status(500).json({ error: 'Failed to resolve user account' });
       return;
     }
 
-    console.log(`[signup] Keycloak user created: ${kcUuid}`);
+    console.log(`[signup] Keycloak user created: username=${username} sub=${kcUuid}`);
 
-    // 6. Create Canton user (link KC UUID → party)
+    // 5. Allocate Canton party with hint = Keycloak UUID.
+    const cantonAdminToken = await getAdminToken();
+    // Canton's partyIdHint must match /^[A-Za-z0-9_\-]+$/. Strip dashes from
+    // the UUID since Keycloak emits hyphenated UUIDs — we keep alnum only.
+    const partyHint = kcUuid.replace(/-/g, '');
+    const partyRes = await fetch(`${CANTON_LEDGER_API}/v2/parties`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${cantonAdminToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ partyIdHint: partyHint, identityProviderId: '' }),
+    });
+
+    const partyData = await partyRes.json() as any;
+    const partyId: string | undefined = partyData.partyDetails?.party;
+    if (!partyId) {
+      res.status(400).json({ error: 'Failed to create Canton party', details: partyData });
+      return;
+    }
+    console.log(`[signup] Canton party created: ${partyId}`);
+
+    // 6. Create Canton user (link kcUuid → primaryParty=partyId).
     await fetch(`${CANTON_LEDGER_API}/v2/users`, {
       method: 'POST',
       headers: {
@@ -222,54 +222,32 @@ router.post('/signup', async (req: Request, res: Response) => {
       }),
     });
 
-    // 7. Grant CanActAs + CanReadAs
+    // 7. Grant CanActAs + CanReadAs.
     await grantRight(cantonAdminToken, kcUuid, 'CanActAs', partyId);
     await grantRight(cantonAdminToken, kcUuid, 'CanReadAs', partyId);
-
     console.log(`[signup] Rights granted for ${username}`);
 
-    // 8. Create VaultAccountProposal
-    try {
-      const templates = getTemplateIds(PACKAGE_ID);
-      const opToken = await getOperatorToken(sdkConfig);
-      const opCantonId = await resolveOperatorCantonId(sdkConfig);
+    // 8. Upsert into our local users table so /me + the watcher find them.
+    await getPool().query(
+      `INSERT INTO users (party_id, is_external, keycloak_sub, username)
+         VALUES ($1, false, $2, $3)
+       ON CONFLICT (party_id) DO UPDATE
+         SET keycloak_sub = EXCLUDED.keycloak_sub,
+             username     = EXCLUDED.username`,
+      [partyId, kcUuid, username],
+    );
 
-      await submitCommand(
-        sdkConfig,
-        opToken,
-        opCantonId,
-        [PARTIES.operator, PARTIES.vaultPool],
-        [
-          {
-            CreateCommand: {
-              templateId: templates.VaultAccountProposal,
-              createArguments: {
-                operator: PARTIES.operator,
-                user: partyId,
-                issuer: PARTIES.tokenIssuer,
-                vaultPool: PARTIES.vaultPool,
-              },
-            },
-          },
-        ],
-      );
+    // 9. (deferred) VaultAccountProposal — the new operator-only-signed
+    //    contract may not need it. Re-enable here once the new Daml package
+    //    + template IDs are confirmed (see canton-sdk/config.ts).
 
-      console.log(`[signup] VaultAccountProposal created for ${username}`);
-    } catch (vaultErr) {
-      console.error(`[signup] VaultAccountProposal failed (non-fatal):`, vaultErr);
-      // Non-fatal — user can still login, operator can create proposal later
-    }
-
-    // 9. Redeem invite code with username
-    const userInfo: RedeemedByInfo = {
-      username,
-    };
-
+    // 10. Redeem invite code.
+    const userInfo: RedeemedByInfo = { username, partyId };
     try {
       await redeemInviteCode(inviteCode, userInfo);
     } catch (redeemErr) {
-      // Race condition: someone else redeemed between check and here
-      // User is already created, so just log the warning
+      // Race condition: someone else redeemed between check and here.
+      // User is already created; just log.
       console.error(`[signup] Failed to mark invite code as redeemed:`, redeemErr);
     }
 
@@ -279,6 +257,7 @@ router.post('/signup', async (req: Request, res: Response) => {
       success: true,
       username,
       partyId,
+      kcUuid,
       message: 'Account created. Please login to continue.',
     });
   } catch (err) {

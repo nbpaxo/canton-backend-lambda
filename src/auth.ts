@@ -82,9 +82,65 @@ async function getAdminToken(): Promise<string> {
 }
 
 /**
- * Express middleware: validates Keycloak JWT and populates req.user.
+ * Express middleware: identifies the caller.
+ *
+ * Two modes (set via AUTH_MODE env var):
+ *
+ *   keycloak  — verify the Bearer JWT against Keycloak JWKS, resolve the
+ *               Canton party via /v2/users/{sub}. The full secure path used
+ *               for validator-signup users.
+ *
+ *   open      — DEV ONLY. Accept an `x-party-id` header (or `?partyId=`
+ *               query) as the caller's identity, with NO cryptographic
+ *               verification. This is the interim shim while the Loop
+ *               wallet → exchange-backend → lambda auth handoff is still
+ *               being designed (Loop users have a session cookie issued by
+ *               the exchange-backend that the lambda can't decode).
+ *
+ *               Loud warning printed once at boot and on each request.
+ *
+ * Either mode populates req.user.{sub?, party, keycloakToken?}.
  */
+
+const AUTH_MODE = (process.env.AUTH_MODE ?? 'open').toLowerCase();
+let openModeWarned = false;
+
 export function requireAuth(req: Request, res: Response, next: NextFunction): void {
+  if (AUTH_MODE === 'open') {
+    return openModeAuth(req, res, next);
+  }
+  return keycloakAuth(req, res, next);
+}
+
+function openModeAuth(req: Request, res: Response, next: NextFunction): void {
+  if (!openModeWarned) {
+    console.warn(
+      '[auth] AUTH_MODE=open — accepting x-party-id from clients without verification. ' +
+        'DEV ONLY. Switch to AUTH_MODE=keycloak (or add Loop JWT verification) before exposing this beyond localhost.',
+    );
+    openModeWarned = true;
+  }
+
+  const party =
+    (req.headers['x-party-id'] as string | undefined) ??
+    (typeof req.query.partyId === 'string' ? req.query.partyId : undefined);
+
+  if (!party || !/^[A-Za-z0-9_\-]+::[A-Za-z0-9]+$/.test(party)) {
+    res.status(401).json({
+      error: 'Missing or malformed x-party-id (open auth mode expects partyId in header or query)',
+    });
+    return;
+  }
+
+  (req as AuthenticatedRequest).user = {
+    sub: '',
+    party,
+    keycloakToken: '',
+  };
+  next();
+}
+
+function keycloakAuth(req: Request, res: Response, next: NextFunction): void {
   const authHeader = req.headers.authorization;
   if (!authHeader?.startsWith('Bearer ')) {
     res.status(401).json({ error: 'Missing Authorization header' });
@@ -110,7 +166,6 @@ export function requireAuth(req: Request, res: Response, next: NextFunction): vo
         const payload = decoded as jwt.JwtPayload;
         const sub = payload.sub as string;
 
-        // Resolve Canton party
         const adminToken = await getAdminToken();
         const party = await resolveParty(adminToken, sub);
 

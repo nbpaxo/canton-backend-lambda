@@ -1,49 +1,51 @@
 /**
- * Canton backend lambda — express server.
+ * canton-backend-lambda — express server (devnet branch).
  *
- * For local dev: runs as a standalone Express server.
- * For AWS Lambda: export the express app and wrap with serverless-express.
+ * Local dev: standalone Express on PORT.
+ * Production: the same `app` is exported for the AWS Lambda wrapper in
+ *             src/index.ts when AWS_LAMBDA_FUNCTION_NAME is set.
  */
 
 import express from 'express';
 import cors from 'cors';
 import routes from './routes.js';
 import signupRoutes from './signup.js';
+import meRoutes from './api/me.js';
+import kycRoutes from './api/kyc.js';
 import { PORT, CORS_ORIGINS } from './config.js';
 
 const app = express();
 
-// CORS — allow trading terminal origins
-app.use(cors({
-  origin: CORS_ORIGINS,
-  credentials: true,
-}));
+app.use(cors({ origin: CORS_ORIGINS, credentials: true }));
 
+// KYC webhook must read the raw body for HMAC verification — so we mount
+// the KYC router BEFORE the global JSON parser. The webhook handler inside
+// uses express.raw() locally; /kyc/start parses JSON via the global parser
+// below because that mount comes second.
+app.use('/', kycRoutes);
+
+// Everything else gets JSON parsing.
 app.use(express.json());
-
-// Mount routes at root (no /api prefix — lambda paths map directly)
 app.use('/', routes);
 app.use('/', signupRoutes);
+app.use('/', meRoutes);
 
-// Start server (for local dev)
 if (process.env.AWS_LAMBDA_FUNCTION_NAME === undefined) {
   app.listen(PORT, () => {
-    console.log(`Canton backend lambda running on http://localhost:${PORT}`);
-    console.log(`  GET  /health`);
-    console.log(`  POST /signup`);
-    console.log(`  GET  /vault/status`);
-    console.log(`  POST /vault/accept-proposal`);
-    console.log(`  GET  /holdings`);
-    console.log(`  GET  /deposit-receipts`);
-    console.log(`  POST /faucet`);
-    console.log(`  GET  /mint-proposals`);
-    console.log(`  POST /mint-proposals/accept`);
-    console.log(`  POST /deposit`);
-    console.log(`  POST /withdraw`);
-    console.log(`  GET  /admin/invite-codes`);
+    console.log(`canton-backend-lambda (devnet) on http://localhost:${PORT}`);
+    console.log('  GET  /health');
+    console.log('  POST /signup                — validator onboarding (invite-code gated)');
+    console.log('  POST /validate-invite');
+    console.log('  GET  /me                    — caller profile + KYC status');
+    console.log('  GET  /vault/status');
+    console.log('  POST /vault/accept-proposal');
+    console.log('  GET  /holdings');
+    console.log('  GET  /deposit-receipts');
+    console.log('  POST /kyc/start             — create a Persona inquiry');
+    console.log('  POST /kyc/webhook           — Persona event sink (HMAC verified)');
+    console.log('  GET  /admin/invite-codes    — admin (x-api-key)');
   });
 }
 
-// Export for Lambda handler wrapper
 export { app };
 export default app;

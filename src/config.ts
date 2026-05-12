@@ -8,43 +8,58 @@ if (!process.env.AWS_LAMBDA_FUNCTION_NAME) {
 }
 
 // Canton Ledger
-export const CANTON_LEDGER_API = process.env.CANTON_LEDGER_API || 'http://localhost:3975';
+export const CANTON_LEDGER_API = process.env.CANTON_LEDGER_API || 'https://canton.56.69.6.174.nip.io';
 
 // Keycloak (for JWKS verification + operator token)
-export const KEYCLOAK_BASE = process.env.KEYCLOAK_BASE || 'http://keycloak.localhost:8082';
+export const KEYCLOAK_BASE = process.env.KEYCLOAK_BASE || 'https://keycloak.56.69.6.174.nip.io';
 export const KEYCLOAK_REALM = process.env.KEYCLOAK_REALM || 'AppProvider';
 export const KEYCLOAK_CLIENT_ID = process.env.KEYCLOAK_CLIENT_ID || 'app-provider-validator';
 export const KEYCLOAK_CLIENT_SECRET = process.env.KEYCLOAK_CLIENT_SECRET || 'AL8648b9SfdTFImq7FV56Vd0KHifHBuC';
 export const KEYCLOAK_TOKEN_URL = `${KEYCLOAK_BASE}/realms/${KEYCLOAK_REALM}/protocol/openid-connect/token`;
 
 // Operator Keycloak credentials
-export const OPERATOR_KC_USERNAME = process.env.OPERATOR_KC_USERNAME || 'operator';
-export const OPERATOR_KC_PASSWORD = process.env.OPERATOR_KC_PASSWORD || 'operator';
+export const OPERATOR_KC_USERNAME = process.env.OPERATOR_KC_USERNAME || 'mperpoperator';
+export const OPERATOR_KC_PASSWORD = process.env.OPERATOR_KC_PASSWORD || 'mperpoperator';
 
-// Circle (token issuer) Keycloak credentials — for minting USDC
-export const CIRCLE_KC_USERNAME = process.env.CIRCLE_KC_USERNAME || 'circle';
-export const CIRCLE_KC_PASSWORD = process.env.CIRCLE_KC_PASSWORD || 'circle';
+// Token-issuer Keycloak credentials. On devnet (Amulet/CC) the issuer is
+// the DSO and we don't mint; keep these for the custom-USDC variant if/when
+// it returns.
+export const CIRCLE_KC_USERNAME = process.env.CIRCLE_KC_USERNAME || 'mperpoperator';
+export const CIRCLE_KC_PASSWORD = process.env.CIRCLE_KC_PASSWORD || 'mperpoperator';
 
-// Daml package ID
-export const PACKAGE_ID = process.env.PACKAGE_ID || '20dda9c77959da83a4cdcf8ad07dc95afcf335ec27a421e530268c8de775481f';
+// Daml package ID — set after new DAR is deployed; will be empty until then.
+export const PACKAGE_ID = process.env.PACKAGE_ID || '';
 
-// Participant suffix (fingerprint)
-export const PARTICIPANT_SUFFIX = process.env.PARTICIPANT_SUFFIX || '1220327e3eff51506a46b72ae1ec0c05471754a2fadbc1440b22991dd125778b6d26';
+// Participant suffix (devnet validator fingerprint)
+export const PARTICIPANT_SUFFIX = process.env.PARTICIPANT_SUFFIX
+  || '12203171abe141f5537ded76661f4ff75b4fde178e950fca4193e2bb268e8238cfb2';
 
-// Party IDs
+// Exchange API — legacy /deposit and /withdraw Lambda paths in src/index.ts
+// still reference these. The express server (server.ts) no longer uses them.
+// Drop entirely when index.ts is cleaned up for the post-watcher world.
+export const EXCHANGE_DEPOSIT_URL = process.env.EXCHANGE_DEPOSIT_URL || '';
+export const EXCHANGE_WITHDRAW_URL = process.env.EXCHANGE_WITHDRAW_URL || '';
+
+// Managed party ids (mirrors exchange-v2 devnet allocation)
 export const PARTIES = {
-  operator: `operator::${PARTICIPANT_SUFFIX}`,
-  vaultPool: `vaultpool::${PARTICIPANT_SUFFIX}`,
-  treasury: `treasury::${PARTICIPANT_SUFFIX}`,
-  tokenIssuer: `circle::${PARTICIPANT_SUFFIX}`,
+  operator:  process.env.OPERATOR_PARTY_ID   || `mperpoperator::${PARTICIPANT_SUFFIX}`,
+  vaultPool: process.env.VAULT_POOL_PARTY_ID || `mperpvaultpool::${PARTICIPANT_SUFFIX}`,
+  treasury:  process.env.TREASURY_PARTY_ID   || `mperptreasury::${PARTICIPANT_SUFFIX}`,
+  // Token issuer = DSO when INSTRUMENT_VARIANT=amulet (devnet default).
+  tokenIssuer: process.env.INSTRUMENT_ADMIN_PARTY_ID
+    || `DSO::1220be58c29e65de40bf273be1dc2b266d43a9a002ea5b18955aeef7aac881bb471a`,
 } as const;
 
-// Exchange API (the real deployed exchange backend)
-export const EXCHANGE_DEPOSIT_URL = process.env.EXCHANGE_DEPOSIT_URL || 'https://be.zeromile.xyz/v1/deposit/defi';
-export const EXCHANGE_WITHDRAW_URL = process.env.EXCHANGE_WITHDRAW_URL || 'https://be.mperps.xyz/v1/withdraw/defi';
-
 // CORS allowed origins
-export const CORS_ORIGINS = (process.env.CORS_ORIGINS || 'http://localhost:3000,https://testnet.mperps.xyz').split(',');
+export const CORS_ORIGINS = (process.env.CORS_ORIGINS
+  || 'http://localhost:3000,http://localhost:5173,https://testnet.mperps.xyz').split(',');
+
+// ─── Persona Sandbox (KYC) ──────────────────────────────────────────────
+export const PERSONA_API_KEY = process.env.PERSONA_API_KEY || '';
+export const PERSONA_WEBHOOK_SECRET = process.env.PERSONA_WEBHOOK_SECRET || '';
+export const PERSONA_TEMPLATE_ID = process.env.PERSONA_TEMPLATE_ID || '';
+export const PERSONA_ENVIRONMENT_ID = process.env.PERSONA_ENVIRONMENT_ID || '';
+export const PERSONA_API_BASE = process.env.PERSONA_API_BASE || 'https://withpersona.com/api/v1';
 
 // Postgres (devnet branch — replaces DynamoDB for invite codes / users / KYC).
 // Defaults match the docker-compose service.
