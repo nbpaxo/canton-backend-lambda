@@ -148,6 +148,100 @@ export async function submitCommand(
   return res.json() as Promise<Record<string, unknown>>;
 }
 
+// ─── Tx-tree lookups (used by the deposit watcher) ───────────────────────
+
+/**
+ * Look up the create event of a single contract. Used by the watcher to
+ * find the `offset` of the transaction that produced an Amulet Holding,
+ * which we then resolve to the originating TransferFactory_Transfer.
+ */
+export async function getEventsByContractId(
+  config: CantonSdkConfig,
+  token: string,
+  args: { contractId: string; requestingParties: string[] },
+): Promise<{ created?: { offset?: number; createdEvent?: { offset?: number; [k: string]: unknown }; [k: string]: unknown } }> {
+  const eventFormat = buildWildcardEventFormat(args.requestingParties);
+  const res = await fetch(`${config.cantonLedgerApi}/v2/events/events-by-contract-id`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ contractId: args.contractId, eventFormat }),
+  });
+  if (!res.ok) throw new Error(`events-by-contract-id failed (${res.status}): ${await res.text()}`);
+  return res.json() as Promise<{ created?: { offset?: number; createdEvent?: { offset?: number; [k: string]: unknown }; [k: string]: unknown } }>;
+}
+
+/** Fetch the full transaction tree for an offset (LEDGER_EFFECTS shape). */
+export async function getTransactionTreeByOffset(
+  config: CantonSdkConfig,
+  token: string,
+  args: { offset: number; requestingParties: string[] },
+): Promise<Record<string, unknown>> {
+  const eventFormat = buildWildcardEventFormat(args.requestingParties);
+  const res = await fetch(`${config.cantonLedgerApi}/v2/updates/update-by-offset`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      offset: args.offset,
+      updateFormat: {
+        includeTransactions: { eventFormat, transactionShape: 'TRANSACTION_SHAPE_LEDGER_EFFECTS' },
+      },
+    }),
+  });
+  if (!res.ok) throw new Error(`update-by-offset failed (${res.status}): ${await res.text()}`);
+  return res.json() as Promise<Record<string, unknown>>;
+}
+
+function buildWildcardEventFormat(parties: string[]): Record<string, unknown> {
+  const filtersByParty: Record<string, unknown> = {};
+  for (const p of parties) {
+    filtersByParty[p] = {
+      cumulative: [
+        { identifierFilter: { WildcardFilter: { value: { includeCreatedEventBlob: false } } } },
+      ],
+    };
+  }
+  return { filtersByParty, verbose: false };
+}
+
+/** Walk a tx tree and pull every exercise event's choice argument. */
+export interface ExerciseEvent {
+  templateId?: string;
+  interfaceId?: string;
+  contractId?: string;
+  choice?: string;
+  choiceArgument?: Record<string, unknown>;
+  actingParties?: string[];
+}
+export function collectExerciseEvents(tree: Record<string, unknown>): ExerciseEvent[] {
+  const out: ExerciseEvent[] = [];
+
+  // Shape A: { transactionTree: { eventsById: { ... ExercisedTreeEvent } } }
+  const eventsById =
+    (tree.transactionTree as { eventsById?: Record<string, Record<string, unknown>> } | undefined)?.eventsById;
+  if (eventsById) {
+    for (const e of Object.values(eventsById)) {
+      const ex = (e.ExercisedTreeEvent ?? e.ExercisedEvent) as { value?: ExerciseEvent } | ExerciseEvent | undefined;
+      if (!ex) continue;
+      out.push(((ex as { value?: ExerciseEvent }).value ?? ex) as ExerciseEvent);
+    }
+  }
+
+  // Shape B: { update: { Transaction: { value: { events: [{ ExercisedEvent: ... }] } } } }
+  const txEvents =
+    ((tree.update as { Transaction?: { value?: { events?: unknown[] } } } | undefined)?.Transaction?.value?.events
+      ?? (tree.Transaction as { value?: { events?: unknown[] } } | undefined)?.value?.events) as
+      | Array<{ ExercisedEvent?: { value?: ExerciseEvent } | ExerciseEvent }>
+      | undefined;
+  if (Array.isArray(txEvents)) {
+    for (const e of txEvents) {
+      const ex = e.ExercisedEvent;
+      if (!ex) continue;
+      out.push(((ex as { value?: ExerciseEvent }).value ?? ex) as ExerciseEvent);
+    }
+  }
+  return out;
+}
+
 /**
  * Extract a created contract ID from a submit-and-wait result.
  */
