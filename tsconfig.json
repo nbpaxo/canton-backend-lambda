@@ -12,5 +12,14 @@
     "declaration": true,
     "sourceMap": true
   },
-  "include": ["src"]
+  "include": ["src"],
+  "exclude": [
+    "node_modules",
+    "dist",
+    // index.ts is the AWS Lambda router; left untouched on the devnet
+    // branch (we're local-first). It still references templates / SDK
+    // methods that have been deleted. Re-include after a proper Lambda
+    // wrapper rewrite, ideally via serverless-express around server.ts.
+    "src/index.ts"
+  ]
 }

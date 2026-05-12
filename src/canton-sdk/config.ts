@@ -1,39 +1,27 @@
 /**
- * Canton SDK Configuration
+ * Canton SDK config + template identifiers (devnet branch).
  *
- * All Canton-specific configuration lives here.
- * Exchange developers only need to set these values once.
+ * Our DApp templates live in package `exchange-v2-core` (1.0.0). Canton
+ * resolves `#exchange-v2-core:Module:Template` against the most recent
+ * vetted version, so we don't track hex package IDs in code. CIP-56
+ * interfaces come from Splice's published packages.
+ *
+ * See exchange-v2/backend/src/ledger/templates.ts — this file mirrors that
+ * surface, trimmed to what the lambda needs.
  */
 
 export interface CantonSdkConfig {
-  /** Canton Ledger API base URL (e.g., http://localhost:3975) */
   cantonLedgerApi: string;
-
-  /** Keycloak base URL (e.g., http://localhost:8082) */
   keycloakBase: string;
-
-  /** Keycloak realm name */
   keycloakRealm: string;
-
-  /** Keycloak token endpoint URL (derived from base + realm if not set) */
   keycloakTokenUrl: string;
-
-  /** Keycloak client ID (the client Canton trusts) */
   keycloakClientId: string;
-
-  /** Keycloak client secret */
   keycloakClientSecret: string;
-
-  /** Operator Keycloak username (password grant) */
   operatorUsername: string;
-
-  /** Operator Keycloak password */
   operatorPassword: string;
-
-  /** Daml package ID (changes per deployment) */
+  /** Stable package reference (e.g. "#exchange-v2-core"). Reserved — most
+   *  callers use the constants below directly. */
   packageId: string;
-
-  /** Canton party IDs */
   parties: {
     operator: string;
     vaultPool: string;
@@ -42,10 +30,24 @@ export interface CantonSdkConfig {
   };
 }
 
-/**
- * Build the Keycloak authorization URL for user login.
- * Frontend redirects to this URL → Keycloak login page → redirects back with ?code=
- */
+// ─── Our contracts (exchange-v2-core) ────────────────────────────────────
+export const TPL_DEPOSIT_RECORD    = '#exchange-v2-core:Vault:DepositRecord';
+export const TPL_SETTLEMENT_RECORD = '#exchange-v2-core:Vault:SettlementRecord';
+
+// ─── CIP-56 interfaces (Splice-built, vetted on every Splice validator) ─
+export const IFACE_HOLDING =
+  '#splice-api-token-holding-v1:Splice.Api.Token.HoldingV1:Holding';
+export const IFACE_TRANSFER_FACTORY =
+  '#splice-api-token-transfer-instruction-v1:Splice.Api.Token.TransferInstructionV1:TransferFactory';
+export const IFACE_TRANSFER_INSTRUCTION =
+  '#splice-api-token-transfer-instruction-v1:Splice.Api.Token.TransferInstructionV1:TransferInstruction';
+
+// ─── Choice names ───────────────────────────────────────────────────────
+export const CHOICE_TRANSFER_FACTORY_TRANSFER     = 'TransferFactory_Transfer';
+export const CHOICE_DEPOSIT_CONSUME_FOR_WITHDRAWAL = 'ConsumeForWithdrawal';
+export const CHOICE_DEPOSIT_SPLIT_FOR_WITHDRAWAL   = 'SplitForWithdrawal';
+
+// ─── Keycloak URL builders (used by auth-code flow if/when re-enabled) ──
 export function getKeycloakAuthUrl(config: CantonSdkConfig, redirectUri: string): string {
   const base = `${config.keycloakBase}/realms/${config.keycloakRealm}/protocol/openid-connect/auth`;
   const params = new URLSearchParams({
@@ -57,10 +59,6 @@ export function getKeycloakAuthUrl(config: CantonSdkConfig, redirectUri: string)
   return `${base}?${params.toString()}`;
 }
 
-/**
- * Build the Keycloak logout URL.
- * Redirects user to Keycloak to end their SSO session, then back to the app.
- */
 export function getKeycloakLogoutUrl(config: CantonSdkConfig, postLogoutRedirectUri: string): string {
   const base = `${config.keycloakBase}/realms/${config.keycloakRealm}/protocol/openid-connect/logout`;
   const params = new URLSearchParams({
@@ -68,16 +66,4 @@ export function getKeycloakLogoutUrl(config: CantonSdkConfig, postLogoutRedirect
     post_logout_redirect_uri: postLogoutRedirectUri,
   });
   return `${base}?${params.toString()}`;
-}
-
-/** Derive Daml template IDs from package ID */
-export function getTemplateIds(packageId: string) {
-  return {
-    Holding: `${packageId}:Token:Holding`,
-    TransferInstruction: `${packageId}:Token:TransferInstruction`,
-    VaultAccount: `${packageId}:Vault:VaultAccount`,
-    DepositReceipt: `${packageId}:Vault:DepositReceipt`,
-    VaultAccountProposal: `${packageId}:Vault:VaultAccountProposal`,
-    MintProposal: `${packageId}:Token:MintProposal`,
-  } as const;
 }

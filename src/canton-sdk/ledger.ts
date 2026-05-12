@@ -24,16 +24,37 @@ async function getLedgerEndOffset(config: CantonSdkConfig, token: string): Promi
   return data.offset ?? 0;
 }
 
+export interface ActiveContract {
+  contractId: string;
+  templateId: string;
+  payload: Record<string, unknown>;
+  /** Interface view payload when queried by interfaceId. */
+  interfaceView?: Record<string, unknown>;
+}
+
 /**
- * Query active contracts for a given party and template.
+ * Query active contracts for a party, by template OR by interface (CIP-56).
+ *
+ * Uses Canton 3.4's `cumulative.identifierFilter` shape. Pass either:
+ *   { templateId:  "#exchange-v2-core:Vault:DepositRecord" }
+ *   { interfaceId: "#splice-api-token-holding-v1:...HoldingV1:Holding" }
+ *
+ * For interface queries the response carries `interfaceViews[*].viewValue`
+ * — we surface that as `interfaceView` so callers can read e.g.
+ * `view.amount`, `view.owner`, `view.instrumentId`.
  */
 export async function getActiveContracts(
   config: CantonSdkConfig,
   token: string,
   partyId: string,
-  templateId: string,
-): Promise<Array<{ contractId: string; payload: Record<string, unknown> }>> {
+  filter: { templateId: string } | { interfaceId: string },
+): Promise<ActiveContract[]> {
   const activeAtOffset = await getLedgerEndOffset(config, token);
+
+  const identifierFilter =
+    'templateId' in filter
+      ? { TemplateFilter: { value: { templateId: filter.templateId, includeCreatedEventBlob: false } } }
+      : { InterfaceFilter: { value: { interfaceId: filter.interfaceId, includeInterfaceView: true, includeCreatedEventBlob: false } } };
 
   const res = await fetch(`${config.cantonLedgerApi}/v2/state/active-contracts`, {
     method: 'POST',
@@ -44,12 +65,10 @@ export async function getActiveContracts(
     body: JSON.stringify({
       filter: {
         filtersByParty: {
-          [partyId]: {
-            inclusive: { templateFilters: [{ templateId }] },
-          },
+          [partyId]: { cumulative: [{ identifierFilter }] },
         },
       },
-      verbose: true,
+      verbose: false,
       activeAtOffset,
     }),
   });
@@ -57,24 +76,25 @@ export async function getActiveContracts(
   if (!res.ok) throw new Error(`ACS query failed (${res.status}): ${await res.text()}`);
 
   const data = await res.json() as any;
-  const entries: any[] = Array.isArray(data) ? data : (data.entries || []);
+  const entries: any[] = Array.isArray(data) ? data : (data.entries || data.activeContracts || []);
 
   return entries
-    .filter((e: any) => {
-      const ce = e.contractEntry || e;
-      const ac = ce.JsActiveContract || ce;
-      const evt = ac.createdEvent || ac;
-      return evt.templateId === templateId;
-    })
-    .map((e: any) => {
-      const ce = e.contractEntry || e;
-      const ac = ce.JsActiveContract || ce;
-      const evt = ac.createdEvent || ac;
+    .map((e: any): ActiveContract | null => {
+      const ce = e.contractEntry ?? e;
+      const ac = ce.JsActiveContract ?? ce;
+      const evt = ac.createdEvent ?? ac;
+      const contractId = evt.contractId;
+      if (!contractId) return null;
+      const interfaceViews = evt.interfaceViews as Array<{ viewValue?: Record<string, unknown> }> | undefined;
+      const interfaceView = interfaceViews?.[0]?.viewValue;
       return {
-        contractId: evt.contractId,
-        payload: evt.createArguments || evt.createArgument || evt.payload || {},
+        contractId,
+        templateId: evt.templateId ?? '',
+        payload: (evt.createArguments ?? evt.createArgument ?? evt.payload ?? {}) as Record<string, unknown>,
+        interfaceView,
       };
-    });
+    })
+    .filter((c): c is ActiveContract => c !== null);
 }
 
 // ─── Command Submission ──────────────────────────────────────────────────────

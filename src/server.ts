@@ -37,10 +37,8 @@ if (process.env.AWS_LAMBDA_FUNCTION_NAME === undefined) {
     console.log('  POST /signup                — validator onboarding (invite-code gated)');
     console.log('  POST /validate-invite');
     console.log('  GET  /me                    — caller profile + KYC status');
-    console.log('  GET  /vault/status');
-    console.log('  POST /vault/accept-proposal');
-    console.log('  GET  /holdings');
-    console.log('  GET  /deposit-receipts');
+    console.log('  GET  /holdings              — on-chain Amulet/CC holdings');
+    console.log('  GET  /deposit-receipts      — operator-signed DepositRecords');
     console.log('  POST /kyc/start             — create a Persona inquiry');
     console.log('  POST /kyc/webhook           — Persona event sink (HMAC verified)');
     console.log('  GET  /admin/invite-codes    — admin (x-api-key)');

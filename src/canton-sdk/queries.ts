@@ -1,128 +1,109 @@
 /**
- * Canton Query Functions
+ * High-level query helpers for the lambda's user-facing routes.
  *
- * High-level query functions for exchange developers.
- * These wrap the low-level ACS queries with parsed, typed results.
+ * Holdings: read CIP-56 `Holding` interface as the operator (operator can
+ * see vaultPool's holdings; for user holdings we'd want their JWT, but
+ * with the open-auth shim we don't have one — so the operator queries on
+ * the user's behalf and we filter by owner client-side. Replace with the
+ * user's JWT once a proper auth path lands).
+ *
+ * DepositRecords: read our `#exchange-v2-core:Vault:DepositRecord`
+ * template as the operator and filter by the `user` data field.
  */
 
 import type { CantonSdkConfig } from './config.js';
-import { getTemplateIds } from './config.js';
-import { getOperatorToken } from './tokens.js';
+import { IFACE_HOLDING, TPL_DEPOSIT_RECORD } from './config.js';
 import { getActiveContracts } from './ledger.js';
-
-// ─── Types ───────────────────────────────────────────────────────────────────
+import { getOperatorToken } from './tokens.js';
 
 export interface HoldingInfo {
-  /** Contract ID (needed for deposit) */
   contractId: string;
-  /** Owner party ID */
   owner: string;
-  /** Token issuer party ID */
-  issuer: string;
-  /** Token amount */
   amount: number;
+  instrumentAdmin: string;
+  instrumentId: string;
+  locked: boolean;
 }
 
-export interface DepositReceiptInfo {
-  /** Contract ID */
+export interface DepositRecordInfo {
   contractId: string;
-  /** User party ID */
   user: string;
-  /** Deposited amount */
   amount: number;
-  /** Deposit reference */
-  depositRef: string;
+  sourceTransferId: string;
+  depositedAt: string;
 }
-
-// ─── User Holdings (USDC on-chain balance) ───────────────────────────────────
 
 /**
- * Get all USDC Holdings owned by a user on Canton.
+ * Read all CIP-56 Holdings owned by `userParty`. Optionally filter by
+ * instrument (we default to whatever's in env via the caller).
  *
- * These are the user's on-chain token balances — what they can deposit
- * into the exchange. Each holding is a separate UTXO contract.
- *
- * @param userToken - User's Keycloak access token
- * @param userParty - User's Canton party ID
- * @returns Array of holdings with contract IDs and amounts
- *
- * @example
- * ```typescript
- * const holdings = await canton.getUserHoldings(userToken, userParty);
- * // [
- * //   { contractId: "00abc...", owner: "neeraj::122...", issuer: "circle::122...", amount: 100 },
- * //   { contractId: "00def...", owner: "neeraj::122...", issuer: "circle::122...", amount: 50 },
- * // ]
- * // Total on-chain: 150 USDC
- * ```
+ * Note: queries as the user's party. With AUTH_MODE=open we don't have a
+ * user JWT, so we fall back to an operator-scoped query and filter
+ * client-side by owner. That's fine for read but doesn't generalize for
+ * mutations.
  */
 export async function getUserHoldings(
   config: CantonSdkConfig,
-  userToken: string,
   userParty: string,
+  opts: { instrumentAdmin?: string; instrumentId?: string } = {},
 ): Promise<HoldingInfo[]> {
-  const templates = getTemplateIds(config.packageId);
-
-  const contracts = await getActiveContracts(
-    config, userToken, userParty, templates.Holding,
-  );
-
-  return contracts
-    .map((c) => {
-      const p = c.payload as Record<string, unknown>;
-      return {
-        contractId: c.contractId,
-        owner: String(p.owner ?? ''),
-        issuer: String(p.issuer ?? ''),
-        amount: parseFloat(String(p.amount ?? '0')),
-      };
-    })
-    .filter((h) => h.owner === userParty && h.amount > 0);
-}
-
-// ─── Vault Deposit Receipts (on-chain deposit proof) ─────────────────────────
-
-/**
- * Get all deposit receipts for a user in the vault.
- *
- * These represent the user's deposited tokens held by the vault pool.
- * Sum of receipt amounts = total deposited on-chain.
- * This is different from the exchange off-chain balance (which includes PnL).
- *
- * @param userParty - User's Canton party ID
- * @returns Array of deposit receipts with amounts
- *
- * @example
- * ```typescript
- * const receipts = await canton.getUserVaultHoldings(userParty);
- * // [
- * //   { contractId: "00abc...", user: "neeraj::122...", amount: 100, depositRef: "dep-..." },
- * //   { contractId: "00def...", user: "neeraj::122...", amount: 50, depositRef: "dep-..." },
- * // ]
- * // Total in vault: 150 USDC deposited
- * ```
- */
-export async function getUserVaultHoldings(
-  config: CantonSdkConfig,
-  userParty: string,
-): Promise<DepositReceiptInfo[]> {
-  const templates = getTemplateIds(config.packageId);
   const opToken = await getOperatorToken(config);
 
+  // Try as the user first (when they have rights granted) — falls back to
+  // operator if the user has no rights on this participant.
+  let contracts;
+  try {
+    contracts = await getActiveContracts(config, opToken, userParty, { interfaceId: IFACE_HOLDING });
+  } catch {
+    contracts = await getActiveContracts(config, opToken, config.parties.operator, { interfaceId: IFACE_HOLDING });
+  }
+
+  return contracts
+    .map((c) => {
+      const v = (c.interfaceView ?? c.payload) as Record<string, unknown>;
+      const iid = (v.instrumentId ?? {}) as { admin?: string; id?: string };
+      return {
+        contractId: c.contractId,
+        owner: String(v.owner ?? ''),
+        amount: parseFloat(String(v.amount ?? '0')),
+        instrumentAdmin: iid.admin ?? '',
+        instrumentId: iid.id ?? '',
+        locked: Boolean(v.lock),
+      };
+    })
+    .filter((h) => {
+      if (h.owner !== userParty) return false;
+      if (h.amount <= 0) return false;
+      if (opts.instrumentAdmin && h.instrumentAdmin !== opts.instrumentAdmin) return false;
+      if (opts.instrumentId && h.instrumentId !== opts.instrumentId) return false;
+      return true;
+    });
+}
+
+/**
+ * Read DepositRecord contracts for a user. Queried as the operator since
+ * DepositRecord is operator-only signed (user is a data field, not a
+ * stakeholder).
+ */
+export async function getUserDepositRecords(
+  config: CantonSdkConfig,
+  userParty: string,
+): Promise<DepositRecordInfo[]> {
+  const opToken = await getOperatorToken(config);
   const contracts = await getActiveContracts(
-    config, opToken, config.parties.operator, templates.DepositReceipt,
+    config, opToken, config.parties.operator, { templateId: TPL_DEPOSIT_RECORD },
   );
 
   return contracts
-    .filter((c) => (c.payload as Record<string, unknown>).user === userParty)
     .map((c) => {
-      const p = c.payload as Record<string, unknown>;
+      const p = c.payload;
       return {
         contractId: c.contractId,
         user: String(p.user ?? ''),
         amount: parseFloat(String(p.amount ?? '0')),
-        depositRef: String(p.depositRef ?? ''),
+        sourceTransferId: String(p.sourceTransferId ?? ''),
+        depositedAt: String(p.depositedAt ?? ''),
       };
     })
-    .filter((r) => r.amount > 0);
+    .filter((r) => r.user === userParty && r.amount > 0);
 }
