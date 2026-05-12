@@ -46,9 +46,10 @@ export const EXCHANGE_WITHDRAW_URL = process.env.EXCHANGE_WITHDRAW_URL || 'https
 // CORS allowed origins
 export const CORS_ORIGINS = (process.env.CORS_ORIGINS || 'http://localhost:3000,https://testnet.mperps.xyz').split(',');
 
-// AWS DynamoDB
-export const AWS_REGION = process.env.AWS_REGION || 'ap-southeast-5';
-export const INVITE_TABLE = process.env.INVITE_TABLE || 'canton-invite-codes';
+// Postgres (devnet branch — replaces DynamoDB for invite codes / users / KYC).
+// Defaults match the docker-compose service.
+export const DATABASE_URL =
+  process.env.DATABASE_URL || 'postgres://canton_backend:canton_backend@localhost:5436/canton_backend';
 
 // Admin API key (for admin endpoints like invite code management)
 export const ADMIN_API_KEY = process.env.ADMIN_API_KEY || 'canton-admin-secret';

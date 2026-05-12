@@ -1,0 +1,27 @@
+# Local dev infra for canton-backend-lambda on the devnet branch.
+#
+#   docker compose up -d postgres
+#
+# Postgres listens on host port 5436 to avoid clashing with exchange-v2 (5435)
+# and any local Canton ledger Postgres (often 5432).
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: canton-backend-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: canton_backend
+      POSTGRES_PASSWORD: canton_backend
+      POSTGRES_DB: canton_backend
+    ports:
+      - "5436:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U canton_backend"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  postgres-data:

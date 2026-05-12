@@ -1,32 +1,25 @@
 /**
- * DynamoDB client for invite codes.
+ * Invite-code helpers — Postgres backed (was DynamoDB on master).
  *
- * Table: canton-invite-codes
- * PK: code (String)
+ * Schema: see src/db/schema.sql (table `invite_codes`).
+ *   code         text primary key
+ *   created_at   timestamptz
+ *   redeemed_at  timestamptz   — null until redeemed
+ *   redeemed_by  jsonb         — { username, partyId, email, ... }
  *
- * Schema:
- *   code: string          — the invite code
- *   redeemed: boolean     — whether it's been used
- *   redeemedAt?: string   — ISO timestamp
- *   redeemedBy?: object   — { username, fullName, email, phone, countryCode, partyId }
- *   createdAt: string     — ISO timestamp
+ * Atomicity for redeem: a single UPDATE with WHERE redeemed_at IS NULL.
+ * Returns rowCount=1 on success, 0 if already redeemed or non-existent.
  */
 
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import {
-  DynamoDBDocumentClient,
-  GetCommand,
-  PutCommand,
-  UpdateCommand,
-  ScanCommand,
-} from '@aws-sdk/lib-dynamodb';
-import { AWS_REGION, INVITE_TABLE } from './config.js';
-
-const ddbClient = new DynamoDBClient({ region: AWS_REGION });
-const docClient = DynamoDBDocumentClient.from(ddbClient);
+import { getPool } from './db/pool.js';
 
 export interface RedeemedByInfo {
   username: string;
+  partyId?: string;
+  email?: string;
+  fullName?: string;
+  phone?: string;
+  countryCode?: string;
 }
 
 export interface InviteCode {
@@ -37,60 +30,64 @@ export interface InviteCode {
   createdAt: string;
 }
 
-/**
- * Get an invite code record.
- */
+function rowToInvite(row: {
+  code: string;
+  created_at: Date;
+  redeemed_at: Date | null;
+  redeemed_by: RedeemedByInfo | null;
+}): InviteCode {
+  return {
+    code: row.code,
+    redeemed: row.redeemed_at !== null,
+    redeemedAt: row.redeemed_at ? row.redeemed_at.toISOString() : undefined,
+    redeemedBy: row.redeemed_by ?? undefined,
+    createdAt: row.created_at.toISOString(),
+  };
+}
+
 export async function getInviteCode(code: string): Promise<InviteCode | null> {
-  const result = await docClient.send(new GetCommand({
-    TableName: INVITE_TABLE,
-    Key: { code },
-  }));
-  return (result.Item as InviteCode) ?? null;
+  const pool = getPool();
+  const r = await pool.query(
+    `SELECT code, created_at, redeemed_at, redeemed_by FROM invite_codes WHERE code = $1`,
+    [code],
+  );
+  return r.rows[0] ? rowToInvite(r.rows[0]) : null;
 }
 
-/**
- * Create a new invite code (unused).
- */
 export async function createInviteCode(code: string): Promise<void> {
-  await docClient.send(new PutCommand({
-    TableName: INVITE_TABLE,
-    Item: {
-      code,
-      redeemed: false,
-      createdAt: new Date().toISOString(),
-    },
-    ConditionExpression: 'attribute_not_exists(code)',
-  }));
+  const pool = getPool();
+  await pool.query(
+    `INSERT INTO invite_codes (code) VALUES ($1)
+       ON CONFLICT (code) DO NOTHING`,
+    [code],
+  );
 }
 
 /**
- * Redeem an invite code. Fails if already redeemed or doesn't exist.
- * Uses a conditional update for atomicity.
+ * Atomic redeem. Throws if the code doesn't exist or is already redeemed.
  */
 export async function redeemInviteCode(
   code: string,
   userInfo: RedeemedByInfo,
 ): Promise<void> {
-  await docClient.send(new UpdateCommand({
-    TableName: INVITE_TABLE,
-    Key: { code },
-    UpdateExpression: 'SET redeemed = :t, redeemedAt = :now, redeemedBy = :info',
-    ConditionExpression: 'attribute_exists(code) AND redeemed = :f',
-    ExpressionAttributeValues: {
-      ':t': true,
-      ':f': false,
-      ':now': new Date().toISOString(),
-      ':info': userInfo,
-    },
-  }));
+  const pool = getPool();
+  const r = await pool.query(
+    `UPDATE invite_codes
+        SET redeemed_at = NOW(), redeemed_by = $2::jsonb
+      WHERE code = $1 AND redeemed_at IS NULL`,
+    [code, JSON.stringify(userInfo)],
+  );
+  if (r.rowCount === 0) {
+    throw new Error('invite code not found or already redeemed');
+  }
 }
 
-/**
- * List all invite codes (admin).
- */
 export async function listInviteCodes(): Promise<InviteCode[]> {
-  const result = await docClient.send(new ScanCommand({
-    TableName: INVITE_TABLE,
-  }));
-  return (result.Items as InviteCode[]) ?? [];
+  const pool = getPool();
+  const r = await pool.query(
+    `SELECT code, created_at, redeemed_at, redeemed_by
+       FROM invite_codes
+       ORDER BY created_at DESC`,
+  );
+  return r.rows.map(rowToInvite);
 }
