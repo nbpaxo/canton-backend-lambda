@@ -1,14 +1,18 @@
 /**
- * GET /me — caller's profile + latest KYC status.
+ * GET /me — caller profile (minimal, since the endpoint is open-auth).
  *
- * Auto-creates a row in `users` on first call so the rest of the system
- * (watcher, KYC service) has somewhere to attach state. Defaults assume the
- * caller is a Loop user (is_external=true); validator-signup users already
- * have a row inserted by /signup with is_external=false.
+ * Returns ONLY the data needed for the UI to render — no PII fields. Anyone
+ * can hit this with any x-party-id while AUTH_MODE=open is in effect, so
+ * we deliberately omit email / username / displayName / keycloak_sub.
+ * Auto-creates a users row on first call so the watcher + KYC service
+ * have a place to attach state.
  *
- * In open auth mode the caller identifies themselves via `x-party-id`;
- * in keycloak mode the party comes from the JWT subject lookup. Either
- * way it's `req.user.party` by the time we get here.
+ * Shape:
+ *   {
+ *     partyId, kyc: { inquiryId, status, decision, updatedAt, completedAt },
+ *     instrument: { id, symbol, decimals, admin },
+ *     vaultPool: <party-id>
+ *   }
  */
 import { Router, Request, Response } from 'express';
 import { requireAuth, type AuthenticatedRequest } from '../auth.js';
@@ -23,17 +27,6 @@ import {
 
 const router = Router();
 
-interface UserRow {
-  party_id: string;
-  is_external: boolean;
-  keycloak_sub: string | null;
-  username: string | null;
-  display_name: string | null;
-  email: string | null;
-  status: string;
-  created_at: Date;
-}
-
 interface KycRow {
   inquiry_id: string;
   status: string;
@@ -46,29 +39,16 @@ router.get('/me', requireAuth, async (req: Request, res: Response) => {
   const { party, sub } = (req as AuthenticatedRequest).user;
   const pool = getPool();
 
-  // Try fetch first; if missing, upsert with defaults appropriate for the
-  // auth source we got the request from.
-  let userRow = (
-    await pool.query<UserRow>(
-      `SELECT party_id, is_external, keycloak_sub, username, display_name, email, status, created_at
-         FROM users WHERE party_id = $1`,
-      [party],
-    )
-  ).rows[0];
-
-  if (!userRow) {
-    // Auto-create. If we have a Keycloak sub from the JWT, assume validator
-    // user (is_external=false). Otherwise assume Loop / external.
-    const isExternal = !sub;
-    userRow = (
-      await pool.query<UserRow>(
-        `INSERT INTO users (party_id, is_external, keycloak_sub)
-           VALUES ($1, $2, $3)
-         RETURNING party_id, is_external, keycloak_sub, username, display_name, email, status, created_at`,
-        [party, isExternal, sub || null],
-      )
-    ).rows[0]!;
-  }
+  // Auto-create on first call. Default is_external based on auth source:
+  // a Keycloak sub present → validator user (is_external=false); absent →
+  // Loop / external. We DON'T return is_external to the caller (it's a
+  // private flag).
+  await pool.query(
+    `INSERT INTO users (party_id, is_external, keycloak_sub)
+       VALUES ($1, $2, $3)
+     ON CONFLICT (party_id) DO NOTHING`,
+    [party, !sub, sub || null],
+  );
 
   // Latest KYC inquiry, if any.
   const kycRow = (
@@ -99,26 +79,14 @@ router.get('/me', requireAuth, async (req: Request, res: Response) => {
       };
 
   res.json({
-    partyId: userRow.party_id,
-    isExternal: userRow.is_external,
-    keycloakSub: userRow.keycloak_sub,
-    username: userRow.username,
-    displayName: userRow.display_name,
-    email: userRow.email,
-    status: userRow.status,
-    createdAt: userRow.created_at.toISOString(),
+    partyId: party,
     kyc,
-    // Instrument config — frontend reads these and renders accordingly. On
-    // testnet we'll swap to {id: 'USDCx', symbol: 'USDCx', decimals: 6,
-    // admin: <Circle's party>} via env; no frontend code changes needed.
     instrument: {
       id: INSTRUMENT_ID,
       symbol: INSTRUMENT_SYMBOL,
       decimals: INSTRUMENT_DECIMALS,
       admin: INSTRUMENT_ADMIN_PARTY_ID,
     },
-    // Deposit destination — users send to this party; the watcher detects
-    // and credits the deposit on chain.
     vaultPool: PARTIES.vaultPool,
   });
 });
