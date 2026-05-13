@@ -135,13 +135,18 @@ export function buildInquiryUrl(inquiryId: string, sessionToken: string): string
 /** Terminal statuses where we don't allow restart — user is done. */
 export const KYC_TERMINAL_STATUSES = new Set(['approved']);
 
-/** Statuses where the inquiry can be resumed with a fresh session token. */
+/** Statuses where the inquiry can be resumed with a fresh session token.
+ *  - 'redacted' is intentionally NOT here: Persona deleted the data, so
+ *    /resume on that inquiry will fail; /kyc/start should create a new one.
+ *  - 'declined' is intentionally NOT here either: retry creates a new
+ *    inquiry (user gets a fresh attempt, not a continuation of the old). */
 export const KYC_RESUMABLE_STATUSES = new Set([
   'created',
   'pending',
   'completed',
   'needs_review',
   'expired',
+  'failed',
 ]);
 
 /**
@@ -207,6 +212,13 @@ export function normalizeEventStatus(eventName: string): {
     case 'inquiry.needs-review':       return { status: 'needs_review', decision: 'needs_review' };
     case 'inquiry.expired':            return { status: 'expired',      decision: null };
     case 'inquiry.transitioned':       return { status: 'pending',      decision: null };
+    // System-side failure during processing (e.g. an internal Persona error).
+    // Not a user-actionable decline — they can retry. Stays non-terminal.
+    case 'inquiry.failed':             return { status: 'failed',       decision: null };
+    // Persona deleted the inquiry's PII (GDPR-style data removal). The
+    // inquiry id is no longer usable; /kyc/start treats this as "no
+    // inquiry exists" and creates a fresh one.
+    case 'inquiry.redacted':           return { status: 'redacted',     decision: null };
     default:                           return { status: eventName.replace(/^inquiry\./, ''), decision: null };
   }
 }
