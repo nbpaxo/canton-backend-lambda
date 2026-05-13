@@ -36,10 +36,14 @@ const router = Router();
 // ─── Validation helpers ─────────────────────────────────────────────────────
 
 const USERNAME_RE = /^[a-z][a-z0-9_-]{2,29}$/;
+// Cheap-but-good-enough email check; the real proof is the activation email
+// (which we don't send yet — devnet).
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 interface SignupBody {
   inviteCode: string;
   username: string;
+  email: string;
   password: string;
 }
 
@@ -48,8 +52,25 @@ function validateSignup(body: SignupBody): string | null {
   if (!body.username?.trim()) return 'Username is required';
   if (!USERNAME_RE.test(body.username.toLowerCase()))
     return 'Username must be 3-30 chars, start with a letter, and contain only lowercase letters, numbers, hyphens, or underscores';
+  if (!body.email?.trim()) return 'Email is required';
+  if (!EMAIL_RE.test(body.email.toLowerCase()))
+    return 'Email must be a valid address';
   if (!body.password || body.password.length < 8) return 'Password must be at least 8 characters';
   return null;
+}
+
+/**
+ * Derive the Canton party hint from an email address.
+ *
+ * Frontend (src/lib/partyId.ts in trading-terminal-vite) uses the IDENTICAL
+ * derivation so it can compute the party id locally — `/v1/user/info` only
+ * returns the email, not the party id. KEEP THESE IN SYNC.
+ *
+ *   email → lowercase → split('@')[0] → replace([^a-z0-9_-]+, '_') → trim _ → slice(0, 64)
+ */
+export function partyHintFromEmail(email: string): string {
+  const local = email.toLowerCase().trim().split('@')[0] ?? '';
+  return local.replace(/[^a-z0-9_-]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 64);
 }
 
 // ─── KC Admin helpers ───────────────────────────────────────────────────────
@@ -119,7 +140,18 @@ router.post('/signup', async (req: Request, res: Response) => {
     }
 
     const username = body.username.toLowerCase().trim();
+    const email = body.email.toLowerCase().trim();
     const inviteCode = body.inviteCode.trim().toUpperCase();
+
+    // Canton party hint is derived from the email's local-part so the
+    // frontend can compute the same party id from /v1/user/info's email
+    // without an extra round-trip. Keep `partyHintFromEmail` here aligned
+    // with `partyIdFromEmail` in trading-terminal-vite/src/lib/partyId.ts.
+    const partyHint = partyHintFromEmail(email);
+    if (!partyHint || partyHint.length < 1) {
+      res.status(400).json({ error: 'Email local-part is empty after sanitization' });
+      return;
+    }
 
     // 1. Validate invite code
     const invite = await getInviteCode(inviteCode);
@@ -132,19 +164,34 @@ router.post('/signup', async (req: Request, res: Response) => {
       return;
     }
 
-    // 2. Check if username already exists in Keycloak
+    // 2. Check if username or email already exists in Keycloak
     const kcAdminToken = await getKcAdminToken();
-    const existingUserRes = await fetch(
-      `${KEYCLOAK_BASE}/admin/realms/${KEYCLOAK_REALM}/users?username=${encodeURIComponent(username)}&exact=true`,
-      { headers: { Authorization: `Bearer ${kcAdminToken}` } },
-    );
-    const existingUsers = (await existingUserRes.json()) as any[];
-    if (existingUsers && existingUsers.length > 0) {
-      res.status(409).json({ error: 'Username is already taken. Please choose a different username.' });
+    const existingByUsername = (
+      await (
+        await fetch(
+          `${KEYCLOAK_BASE}/admin/realms/${KEYCLOAK_REALM}/users?username=${encodeURIComponent(username)}&exact=true`,
+          { headers: { Authorization: `Bearer ${kcAdminToken}` } },
+        )
+      ).json()
+    ) as any[];
+    if (existingByUsername?.length > 0) {
+      res.status(409).json({ error: 'Username is already taken.' });
+      return;
+    }
+    const existingByEmail = (
+      await (
+        await fetch(
+          `${KEYCLOAK_BASE}/admin/realms/${KEYCLOAK_REALM}/users?email=${encodeURIComponent(email)}&exact=true`,
+          { headers: { Authorization: `Bearer ${kcAdminToken}` } },
+        )
+      ).json()
+    ) as any[];
+    if (existingByEmail?.length > 0) {
+      res.status(409).json({ error: 'An account with that email already exists.' });
       return;
     }
 
-    // 3. Create Keycloak user FIRST — we need its UUID as the Canton party hint.
+    // 3. Create the Keycloak user with username + email.
     const kcCreateRes = await fetch(
       `${KEYCLOAK_BASE}/admin/realms/${KEYCLOAK_REALM}/users`,
       {
@@ -155,6 +202,7 @@ router.post('/signup', async (req: Request, res: Response) => {
         },
         body: JSON.stringify({
           username,
+          email,
           enabled: true,
           credentials: [{ type: 'password', value: body.password, temporary: false }],
         }),
@@ -167,8 +215,8 @@ router.post('/signup', async (req: Request, res: Response) => {
       return;
     }
 
-    // 4. Get the Keycloak UUID — this is the user's `sub` claim AND will be
-    //    the partyIdHint on Canton, so party_id is `<uuid>::<fingerprint>`.
+    // 4. Get the Keycloak UUID (sub) — kept in our users table for future
+    //    JWT-verifying auth, but NOT used as the Canton party hint.
     const kcUserRes = await fetch(
       `${KEYCLOAK_BASE}/admin/realms/${KEYCLOAK_REALM}/users?username=${encodeURIComponent(username)}&exact=true`,
       { headers: { Authorization: `Bearer ${kcAdminToken}` } },
@@ -180,13 +228,12 @@ router.post('/signup', async (req: Request, res: Response) => {
       return;
     }
 
-    console.log(`[signup] Keycloak user created: username=${username} sub=${kcUuid}`);
+    console.log(
+      `[signup] Keycloak user created: username=${username} email=${email} sub=${kcUuid} partyHint=${partyHint}`,
+    );
 
-    // 5. Allocate Canton party with hint = Keycloak UUID.
+    // 5. Allocate Canton party with hint derived from email (see top of fn).
     const cantonAdminToken = await getAdminToken();
-    // Canton's partyIdHint must match /^[A-Za-z0-9_\-]+$/. Strip dashes from
-    // the UUID since Keycloak emits hyphenated UUIDs — we keep alnum only.
-    const partyHint = kcUuid.replace(/-/g, '');
     const partyRes = await fetch(`${CANTON_LEDGER_API}/v2/parties`, {
       method: 'POST',
       headers: {
@@ -228,13 +275,16 @@ router.post('/signup', async (req: Request, res: Response) => {
     console.log(`[signup] Rights granted for ${username}`);
 
     // 8. Upsert into our local users table so /me + the watcher find them.
+    //    We store email so future server-side lookups (if we ever add
+    //    `x-user-email` resolution) don't need to re-derive the hint.
     await getPool().query(
-      `INSERT INTO users (party_id, is_external, keycloak_sub, username)
-         VALUES ($1, false, $2, $3)
+      `INSERT INTO users (party_id, is_external, keycloak_sub, username, email)
+         VALUES ($1, false, $2, $3, $4)
        ON CONFLICT (party_id) DO UPDATE
          SET keycloak_sub = EXCLUDED.keycloak_sub,
-             username     = EXCLUDED.username`,
-      [partyId, kcUuid, username],
+             username     = EXCLUDED.username,
+             email        = EXCLUDED.email`,
+      [partyId, kcUuid, username, email],
     );
 
     // 9. (deferred) VaultAccountProposal — the new operator-only-signed
@@ -242,7 +292,7 @@ router.post('/signup', async (req: Request, res: Response) => {
     //    + template IDs are confirmed (see canton-sdk/config.ts).
 
     // 10. Redeem invite code.
-    const userInfo: RedeemedByInfo = { username, partyId };
+    const userInfo: RedeemedByInfo = { username, email, partyId };
     try {
       await redeemInviteCode(inviteCode, userInfo);
     } catch (redeemErr) {
@@ -256,6 +306,7 @@ router.post('/signup', async (req: Request, res: Response) => {
     res.json({
       success: true,
       username,
+      email,
       partyId,
       kcUuid,
       message: 'Account created. Please login to continue.',
