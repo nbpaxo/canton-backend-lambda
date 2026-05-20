@@ -105,6 +105,21 @@ async function getAdminToken(): Promise<string> {
 const AUTH_MODE = (process.env.AUTH_MODE ?? 'open').toLowerCase();
 let openModeWarned = false;
 
+/**
+ * Normalize an incoming party id to canonical `hint::fingerprint` form.
+ *
+ * The UI no longer rewrites separators. Legacy users (whose ids were minted
+ * with `.` as the separator, because the source field was an email
+ * local-part where `:` is illegal) still send `.`-form. New users send
+ * `::`-form. Swap `.` → `::` only when no `::` is already present so we
+ * don't double-rewrite anything.
+ */
+export function normalizePartyId(raw: string): string {
+  if (raw.includes('::')) return raw;
+  if (raw.includes('.')) return raw.replaceAll('.', '::');
+  return raw;
+}
+
 export function requireAuth(req: Request, res: Response, next: NextFunction): void {
   if (AUTH_MODE === 'open') {
     return openModeAuth(req, res, next);
@@ -121,9 +136,11 @@ function openModeAuth(req: Request, res: Response, next: NextFunction): void {
     openModeWarned = true;
   }
 
-  const party =
+  const rawParty =
     (req.headers['x-party-id'] as string | undefined) ??
     (typeof req.query.partyId === 'string' ? req.query.partyId : undefined);
+
+  const party = rawParty ? normalizePartyId(rawParty) : undefined;
 
   if (!party || !/^[A-Za-z0-9_\-]+::[A-Za-z0-9]+$/.test(party)) {
     res.status(401).json({

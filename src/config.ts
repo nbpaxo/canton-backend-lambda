@@ -9,6 +9,10 @@ if (!process.env.AWS_LAMBDA_FUNCTION_NAME) {
 
 // Canton Ledger
 export const CANTON_LEDGER_API = process.env.CANTON_LEDGER_API || 'https://canton.56.69.6.174.nip.io';
+// Splice scan API — used to enrich CIP-56 transfer choices with the
+// admin-published TransferFactory contract id, choice context, and the
+// disclosed contracts our participant needs to see to exercise it.
+export const SCAN_API_URL = process.env.SCAN_API_URL || 'https://scan.56.69.6.174.nip.io';
 
 // Keycloak (for JWKS verification + operator token)
 export const KEYCLOAK_BASE = process.env.KEYCLOAK_BASE || 'https://keycloak.56.69.6.174.nip.io';
@@ -70,6 +74,18 @@ export const PERSONA_WEBHOOK_SECRET = process.env.PERSONA_WEBHOOK_SECRET || '';
 export const PERSONA_TEMPLATE_ID = process.env.PERSONA_TEMPLATE_ID || '';
 export const PERSONA_ENVIRONMENT_ID = process.env.PERSONA_ENVIRONMENT_ID || '';
 export const PERSONA_API_BASE = process.env.PERSONA_API_BASE || 'https://withpersona.com/api/v1';
+// Where Persona's hosted flow redirects the browser when the user finishes
+// (or backs out of) an inquiry. Frontend reads the `?kyc=1` query param on
+// the root page and auto-opens the KYC status modal (waiting for login if
+// the session has dropped during the Persona round-trip).
+//
+// Env-driven so it can vary by deployment (testnet vs prod), but if the
+// env var is missing or stale we still want the testnet value rather
+// than an empty string, so we fall back to the canonical URL. Each
+// deploy should set PERSONA_REDIRECT_URI explicitly to match the
+// frontend domain that AppLayout's `?kyc=1` handler is watching.
+export const PERSONA_REDIRECT_URI =
+  process.env.PERSONA_REDIRECT_URI || 'https://testnet.mperps.xyz?kyc=1';
 
 // Postgres (devnet branch — replaces DynamoDB for invite codes / users / KYC).
 // Defaults match the docker-compose service.

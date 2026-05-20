@@ -119,6 +119,20 @@ export type LedgerCommand = ExerciseCommand | CreateCommand;
 
 /**
  * Submit a command to Canton and wait for the transaction result.
+ *
+ * Optional `disclosedContracts` are off-ledger contracts (the scan API
+ * returns these for CIP-56 factory exercises) that our participant needs
+ * to see for this single submission. Each entry is the
+ * `{ templateId, contractId, createdEventBlob, synchronizerId }` blob
+ * returned by Splice scan.
+ *
+ * `commandId` pins idempotency to a request key (e.g. an approval id),
+ * and `deduplicationDuration` is the window Canton honours that key for.
+ * WITHOUT an explicit duration, the participant's default applies (often
+ * 0 = no dedup), so a retry of the same commandId can produce a duplicate
+ * on-chain effect — exactly how a re-run of the retry-withdraw script
+ * could double-spend a withdrawal. Default here is 24 h, which comfortably
+ * covers operator retries while staying inside typical participant max.
  */
 export async function submitCommand(
   config: CantonSdkConfig,
@@ -126,8 +140,32 @@ export async function submitCommand(
   userId: string,
   actAs: string[],
   commands: LedgerCommand[],
+  options: {
+    disclosedContracts?: Array<Record<string, unknown>>;
+    commandId?: string;
+    readAs?: string[];
+    /** Protobuf Duration string ("60s", "3600s", "86400s"…). */
+    deduplicationDuration?: string;
+  } = {},
 ): Promise<Record<string, unknown>> {
-  const commandId = `canton-sdk-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`;
+  const commandId = options.commandId ?? `canton-sdk-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`;
+
+  const body: Record<string, unknown> = {
+    userId,
+    commands,
+    actAs,
+    readAs: options.readAs ?? [],
+    commandId,
+    // Canton 3.x JSON API wraps oneof variants as
+    //   { VariantName: { value: <inner> } }
+    // (same convention as the `identifierFilter` we use in ACS queries).
+    deduplicationPeriod: {
+      DeduplicationDuration: { value: options.deduplicationDuration ?? '86400s' },
+    },
+  };
+  if (options.disclosedContracts && options.disclosedContracts.length > 0) {
+    body.disclosedContracts = options.disclosedContracts;
+  }
 
   const res = await fetch(`${config.cantonLedgerApi}/v2/commands/submit-and-wait-for-transaction-tree`, {
     method: 'POST',
@@ -135,13 +173,7 @@ export async function submitCommand(
       Authorization: `Bearer ${bearerToken}`,
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({
-      userId,
-      commands,
-      actAs,
-      readAs: [],
-      commandId,
-    }),
+    body: JSON.stringify(body),
   });
 
   if (!res.ok) throw new Error(`Canton command failed (${res.status}): ${await res.text()}`);
@@ -243,6 +275,23 @@ export function collectExerciseEvents(tree: Record<string, unknown>): ExerciseEv
 }
 
 /**
+ * Compare two template ids tolerantly. We pass the `#package-name:Module:Template`
+ * shorthand to Canton, but responses always carry the fully-resolved
+ * `<package-id>:Module:Template` form. Strict `===` between those would
+ * always fail; match on the `Module:Template` suffix instead — the part
+ * that uniquely identifies the template once both sides have been resolved.
+ *
+ * Caveat: if two different packages share the same Module:Template name
+ * (rare), this becomes permissive. The tradeoff is worth it for our use.
+ */
+export function templateIdsMatch(actual: string, expected: string): boolean {
+  if (actual === expected) return true;
+  const actualSuffix = actual.split(':').slice(1).join(':');
+  const expectedSuffix = expected.split(':').slice(1).join(':');
+  return actualSuffix.length > 0 && actualSuffix === expectedSuffix;
+}
+
+/**
  * Extract a created contract ID from a submit-and-wait result.
  */
 export function extractCreatedContractId(
@@ -258,7 +307,8 @@ export function extractCreatedContractId(
       const created = event.CreatedTreeEvent as Record<string, unknown> | undefined;
       if (!created) continue;
       const val = (created.value || created) as Record<string, unknown>;
-      if (val.templateId === templateId) {
+      const tid = val.templateId as string | undefined;
+      if (tid && templateIdsMatch(tid, templateId)) {
         return val.contractId as string;
       }
     }

@@ -13,6 +13,7 @@ import { createHmac, timingSafeEqual } from 'node:crypto';
 import {
   PERSONA_API_BASE,
   PERSONA_API_KEY,
+  PERSONA_REDIRECT_URI,
   PERSONA_TEMPLATE_ID,
   PERSONA_WEBHOOK_SECRET,
 } from '../config.js';
@@ -54,6 +55,9 @@ export async function createInquiry(args: CreateInquiryArgs): Promise<PersonaInq
         attributes: {
           'inquiry-template-id': PERSONA_TEMPLATE_ID,
           'reference-id': args.referenceId,
+          // Where Persona redirects the browser after the user finishes
+          // (or backs out of) the hosted flow.
+          ...(PERSONA_REDIRECT_URI ? { 'redirect-uri': PERSONA_REDIRECT_URI } : {}),
           ...(args.fields ? { fields: args.fields } : {}),
         },
       },

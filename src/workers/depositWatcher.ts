@@ -20,6 +20,7 @@ import type { Pool } from 'pg';
 import { closePool, getPool } from '../db/pool.js';
 import {
   CANTON_LEDGER_API,
+  EXCHANGE_DEPOSIT_URL,
   INSTRUMENT_ADMIN_PARTY_ID,
   INSTRUMENT_ID,
   INSTRUMENT_SYMBOL,
@@ -50,6 +51,27 @@ import { getOperatorToken } from '../canton-sdk/tokens.js';
 import { resolveOperatorCantonId } from '../canton-sdk/operator.js';
 
 const INTERVAL_MS = Number(process.env.WATCHER_INTERVAL_MS ?? 5_000);
+// Stop hammering the exchange API after this many failed attempts per deposit.
+// Operator can reset by zeroing exchange_attempts manually for permanent
+// blockers (e.g. user account not yet linked at exchange side).
+const MAX_EXCHANGE_ATTEMPTS = Number(process.env.EXCHANGE_MAX_ATTEMPTS ?? 20);
+// Don't retry more often than this — at 5s interval we'd otherwise hit
+// every tick; for transient errors it's fine, but for a 4xx we want a back-off.
+const RETRY_BACKOFF_MS = Number(process.env.EXCHANGE_RETRY_BACKOFF_MS ?? 30_000);
+const RETRY_BATCH_LIMIT = 25;
+
+// Cutoff for which on-chain transfers the watcher will credit. Any transfer
+// whose `requestedAt` is before this is skipped (logged once + dropped).
+// Use this to ignore vaultPool holdings that existed before the deposit
+// functionality went live, so they don't accidentally get re-credited.
+//   format: ISO-8601 timestamp, e.g. '2026-05-13T00:00:00Z'
+// Unset = process everything (legacy behaviour).
+const PROCESS_FROM_DATE = process.env.WATCHER_PROCESS_FROM_DATE
+  ? new Date(process.env.WATCHER_PROCESS_FROM_DATE)
+  : null;
+if (PROCESS_FROM_DATE && Number.isNaN(PROCESS_FROM_DATE.getTime())) {
+  throw new Error(`WATCHER_PROCESS_FROM_DATE is not a valid ISO date: ${process.env.WATCHER_PROCESS_FROM_DATE}`);
+}
 
 const sdkConfig: CantonSdkConfig = {
   cantonLedgerApi: CANTON_LEDGER_API,
@@ -77,6 +99,7 @@ const MAX_LOOKUP_FAILURES = 3;
 async function main(): Promise<void> {
   const pool = getPool();
   await sanityCheckDb(pool);
+  await backfillSourceHoldingCids(pool);
 
   log(`starting; polling every ${INTERVAL_MS}ms`);
   log(`  vaultPool : ${PARTIES.vaultPool}`);
@@ -106,7 +129,45 @@ async function sanityCheckDb(pool: Pool): Promise<void> {
 }
 
 /**
+ * One-time per startup: populate `source_holding_cid` for any pre-existing
+ * `deposits` / `held_deposits` rows that don't have it set yet. We added
+ * the column later, so old rows are NULL; the dedup query in `tick()`
+ * keys on `source_holding_cid` and would otherwise miss them, causing the
+ * watcher to "re-process" Holdings it already credited (the `transfer_update_id`
+ * UNIQUE constraint stops the duplicate row, but the chain submit + exchange
+ * notify already happened by that point).
+ *
+ * The cid we need lives in audit_log: `deposit.credited` rows carry
+ * `details.holdingCid`, and `held_deposits.raw_meta.holdingCid` was set on
+ * insert. Both backfills are idempotent — they only touch rows where
+ * source_holding_cid IS NULL.
+ */
+async function backfillSourceHoldingCids(pool: Pool): Promise<void> {
+  const d = await pool.query(
+    `UPDATE deposits d
+        SET source_holding_cid = a.details->>'holdingCid'
+       FROM audit_log a
+      WHERE d.source_holding_cid IS NULL
+        AND a.action = 'deposit.credited'
+        AND a.details->>'transferUpdateId' = d.transfer_update_id
+        AND a.details->>'holdingCid' IS NOT NULL`,
+  );
+  const h = await pool.query(
+    `UPDATE held_deposits
+        SET source_holding_cid = raw_meta->>'holdingCid'
+      WHERE source_holding_cid IS NULL
+        AND raw_meta ? 'holdingCid'`,
+  );
+  if ((d.rowCount ?? 0) > 0 || (h.rowCount ?? 0) > 0) {
+    log(`backfilled source_holding_cid: ${d.rowCount ?? 0} deposits, ${h.rowCount ?? 0} held`);
+  }
+}
+
+/**
  * One polling iteration.
+ *  0. Retry any deposits whose on-chain credit succeeded but whose
+ *     exchange-backend notify failed last time (transient 5xx, network,
+ *     or recoverable 4xx where the operator has since fixed the link).
  *  1. List CIP-56 Holdings owned by vaultPool.
  *  2. Filter to Amulet/CC + unlocked + not-yet-seen.
  *  3. For each, resolve the originating transfer's update_id + sender
@@ -114,6 +175,8 @@ async function sanityCheckDb(pool: Pool): Promise<void> {
  *  4. Branch on KYC status; create DepositRecord or write to held_deposits.
  */
 async function tick(pool: Pool): Promise<void> {
+  await retryFailedExchangeNotifies(pool);
+
   const opToken = await getOperatorToken(sdkConfig);
   const opUserId = await resolveOperatorCantonId(sdkConfig);
 
@@ -137,21 +200,25 @@ async function tick(pool: Pool): Promise<void> {
     if (view.lock) { seenHoldingCids.add(c.contractId); continue; } // locked holding (e.g. fee reserve) — skip
     if (Number(amount) <= 0) { seenHoldingCids.add(c.contractId); continue; }
 
-    // Dedup: skip if we've already processed this Holding's source transfer.
+    // Cross-restart dedup, pass 1: by source_holding_cid (set on all new
+    // rows). The backfill at startup populates this on old rows too, so
+    // this is the fast path. Catches > 99% of duplicates without needing
+    // the on-chain lookup below.
     const alreadyRecorded = await pool.query<{ id: number }>(
-      `SELECT id FROM deposits WHERE transfer_update_id = $1
+      `SELECT id FROM deposits WHERE source_holding_cid = $1
        UNION ALL
-       SELECT id FROM held_deposits WHERE transfer_update_id = $1`,
-      [c.contractId], // tentative key; replaced with real update_id below if lookup succeeds
+       SELECT id FROM held_deposits WHERE source_holding_cid = $1`,
+      [c.contractId],
     );
     if (alreadyRecorded.rowCount && alreadyRecorded.rowCount > 0) {
       seenHoldingCids.add(c.contractId);
       continue;
     }
 
-    // Resolve sender + transfer update_id from chain.
+    // Resolve sender + transfer update_id + requestedAt from chain.
     let sender: string | null = null;
     let transferUpdateId: string | null = null;
+    let requestedAt: string | null = null;
     try {
       const ev = await getEventsByContractId(sdkConfig, opToken, {
         contractId: c.contractId,
@@ -166,14 +233,32 @@ async function tick(pool: Pool): Promise<void> {
         offset,
         requestingParties: [PARTIES.vaultPool, PARTIES.operator],
       });
-      // also try to grab updateId from tree if not on the create event
-      transferUpdateId ??= (tree as { updateId?: string }).updateId
-        ?? ((tree.transactionTree as { updateId?: string } | undefined)?.updateId ?? null);
+      // Canton 3 wraps the update id behind a oneof variant in /v2/updates/
+      // update-by-offset. Try every shape we've seen: submit-and-wait-style
+      // `transactionTree.updateId`, top-level `updateId`, and the canonical
+      // update-by-offset path `update.Transaction.value.updateId`. The last
+      // one is what was missing — without it the watcher fell back to
+      // `c.contractId` and DB rows got contract ids in transfer_update_id.
+      transferUpdateId ??=
+        (tree as { updateId?: string }).updateId
+        ?? (tree.transactionTree as { updateId?: string } | undefined)?.updateId
+        ?? (tree as { update?: { Transaction?: { value?: { updateId?: string } } } }).update
+             ?.Transaction?.value?.updateId
+        ?? (tree as { Transaction?: { value?: { updateId?: string } } }).Transaction
+             ?.value?.updateId
+        ?? null;
 
       for (const ex of collectExerciseEvents(tree)) {
-        // CIP-56 TransferFactory_Transfer carries the sender at choiceArgument.transfer.sender.
-        const ca = ex.choiceArgument as { transfer?: { sender?: string } } | undefined;
-        if (ca?.transfer?.sender) { sender = ca.transfer.sender; break; }
+        // CIP-56 TransferFactory_Transfer:
+        //   choiceArgument.transfer.{sender, requestedAt}
+        const ca = ex.choiceArgument as
+          | { transfer?: { sender?: string; requestedAt?: string } }
+          | undefined;
+        if (ca?.transfer?.sender) {
+          sender = ca.transfer.sender;
+          requestedAt = ca.transfer.requestedAt ?? null;
+          break;
+        }
         // Fallback: any controlled exercise's actingParties[0].
         if (!sender && ex.actingParties?.[0]) sender = ex.actingParties[0];
       }
@@ -189,12 +274,66 @@ async function tick(pool: Pool): Promise<void> {
 
     const dedupKey = transferUpdateId ?? c.contractId;
 
+    // Cross-restart dedup, pass 2: by transfer_update_id. Belt-and-suspenders
+    // for the case where source_holding_cid is NULL on an existing row
+    // (backfill couldn't find the holdingCid in audit_log / raw_meta) but
+    // transfer_update_id is correctly set. We do this BEFORE submitCommand
+    // so we never create a duplicate DepositRecord on chain.
+    if (transferUpdateId) {
+      const byTxId = await pool.query<{ id: number }>(
+        `SELECT id FROM deposits WHERE transfer_update_id = $1
+         UNION ALL
+         SELECT id FROM held_deposits WHERE transfer_update_id = $1`,
+        [transferUpdateId],
+      );
+      if (byTxId.rowCount && byTxId.rowCount > 0) {
+        // Heal the missing source_holding_cid so pass-1 catches it next time.
+        await pool.query(
+          `UPDATE deposits SET source_holding_cid = $1
+            WHERE transfer_update_id = $2 AND source_holding_cid IS NULL`,
+          [c.contractId, transferUpdateId],
+        );
+        await pool.query(
+          `UPDATE held_deposits SET source_holding_cid = $1
+            WHERE transfer_update_id = $2 AND source_holding_cid IS NULL`,
+          [c.contractId, transferUpdateId],
+        );
+        log(`dedup hit (tx-id pass) for holding ${c.contractId.slice(0, 14)}… → backfilled source_holding_cid`);
+        seenHoldingCids.add(c.contractId);
+        continue;
+      }
+    }
+
+    // Cutoff: skip transfers older than WATCHER_PROCESS_FROM_DATE. We mark
+    // them as held_deposits with reason='pre_existing' so they're recorded
+    // (operator-visible) but never credited.
+    if (PROCESS_FROM_DATE && requestedAt) {
+      const reqDate = new Date(requestedAt);
+      if (!Number.isNaN(reqDate.getTime()) && reqDate < PROCESS_FROM_DATE) {
+        await pool.query(
+          `INSERT INTO held_deposits (user_party_id, amount, transfer_update_id, source_holding_cid, reason, raw_meta)
+             VALUES ($1, $2, $3, $4, 'pre_existing', $5::jsonb)
+           ON CONFLICT (transfer_update_id) DO NOTHING`,
+          [
+            sender,
+            amount,
+            dedupKey,
+            c.contractId,
+            JSON.stringify({ requestedAt, cutoff: PROCESS_FROM_DATE.toISOString(), holdingCid: c.contractId }),
+          ],
+        );
+        log(`held: pre-existing transfer skipped (requestedAt=${requestedAt}, ${amount} ${INSTRUMENT_ID})`);
+        seenHoldingCids.add(c.contractId);
+        continue;
+      }
+    }
+
     if (!sender) {
       await pool.query(
-        `INSERT INTO held_deposits (user_party_id, amount, transfer_update_id, reason)
-           VALUES (NULL, $1, $2, 'unknown_sender')
+        `INSERT INTO held_deposits (user_party_id, amount, transfer_update_id, source_holding_cid, reason)
+           VALUES (NULL, $1, $2, $3, 'unknown_sender')
          ON CONFLICT (transfer_update_id) DO NOTHING`,
-        [amount, dedupKey],
+        [amount, dedupKey, c.contractId],
       );
       if (!unmatchedLogged.has(c.contractId)) {
         log(`held: unknown sender for ${c.contractId.slice(0, 14)}… (${amount} ${INSTRUMENT_ID})`);
@@ -214,10 +353,10 @@ async function tick(pool: Pool): Promise<void> {
 
     if (!userRow) {
       await pool.query(
-        `INSERT INTO held_deposits (user_party_id, amount, transfer_update_id, reason, raw_meta)
-           VALUES (NULL, $1, $2, 'unknown_user', $3::jsonb)
+        `INSERT INTO held_deposits (user_party_id, amount, transfer_update_id, source_holding_cid, reason, raw_meta)
+           VALUES (NULL, $1, $2, $3, 'unknown_user', $4::jsonb)
          ON CONFLICT (transfer_update_id) DO NOTHING`,
-        [amount, dedupKey, JSON.stringify({ sender, holdingCid: c.contractId })],
+        [amount, dedupKey, c.contractId, JSON.stringify({ sender, holdingCid: c.contractId })],
       );
       log(`held: unknown user ${sender.split('::')[0]}… for ${amount} ${INSTRUMENT_ID}`);
       seenHoldingCids.add(c.contractId);
@@ -235,10 +374,10 @@ async function tick(pool: Pool): Promise<void> {
 
     if (kycRow?.decision !== 'approved') {
       await pool.query(
-        `INSERT INTO held_deposits (user_party_id, amount, transfer_update_id, reason, raw_meta)
-           VALUES ($1, $2, $3, 'kyc_not_done', $4::jsonb)
+        `INSERT INTO held_deposits (user_party_id, amount, transfer_update_id, source_holding_cid, reason, raw_meta)
+           VALUES ($1, $2, $3, $4, 'kyc_not_done', $5::jsonb)
          ON CONFLICT (transfer_update_id) DO NOTHING`,
-        [sender, amount, dedupKey, JSON.stringify({ kycDecision: kycRow?.decision ?? 'not_started', holdingCid: c.contractId })],
+        [sender, amount, dedupKey, c.contractId, JSON.stringify({ kycDecision: kycRow?.decision ?? 'not_started', holdingCid: c.contractId })],
       );
       log(`held: kyc not approved for ${sender.split('::')[0]}… (${amount} ${INSTRUMENT_ID}, decision=${kycRow?.decision ?? 'not_started'})`);
       seenHoldingCids.add(c.contractId);
@@ -265,16 +404,43 @@ async function tick(pool: Pool): Promise<void> {
       ]);
       const depositRecordCid = extractCreatedContractId(result, TPL_DEPOSIT_RECORD);
 
-      await pool.query(
-        `INSERT INTO deposits (user_party_id, amount, transfer_update_id, deposit_receipt_cid)
-           VALUES ($1, $2, $3, $4)
-         ON CONFLICT (transfer_update_id) DO NOTHING`,
-        [sender, amount, dedupKey, depositRecordCid],
+      const insertRes = await pool.query<{ id: string }>(
+        `INSERT INTO deposits (user_party_id, amount, transfer_update_id, source_holding_cid, deposit_receipt_cid)
+           VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT (transfer_update_id) DO NOTHING
+         RETURNING id`,
+        [sender, amount, dedupKey, c.contractId, depositRecordCid],
       );
+
+      // RETURNING + rowCount=0 means the ON CONFLICT branch fired — someone
+      // already inserted this transfer (most likely the watcher itself on a
+      // prior run, with source_holding_cid NULL before backfill). The chain
+      // submit above DID create a duplicate DepositRecord (submitCommand is
+      // non-idempotent), but the exchange-credit side effect is what we
+      // care about most — DO NOT call it again.
+      const isFreshDeposit = (insertRes.rowCount ?? 0) > 0;
+
+      if (!isFreshDeposit) {
+        // Heal the missing source_holding_cid so future ticks dedup early.
+        await pool.query(
+          `UPDATE deposits SET source_holding_cid = $1
+            WHERE transfer_update_id = $2 AND source_holding_cid IS NULL`,
+          [c.contractId, dedupKey],
+        );
+        log(`⚠ duplicate deposit detected for tx ${dedupKey.slice(0, 14)}… (already credited; skipping exchange notify)`);
+        await pool.query(
+          `INSERT INTO audit_log (user_party_id, action, details)
+             VALUES ($1, 'deposit.duplicate_detected', $2::jsonb)`,
+          [sender, JSON.stringify({ amount, transferUpdateId: dedupKey, depositRecordCid, holdingCid: c.contractId, requestedAt })],
+        );
+        seenHoldingCids.add(c.contractId);
+        continue;
+      }
+
       await pool.query(
         `INSERT INTO audit_log (user_party_id, action, details)
            VALUES ($1, 'deposit.credited', $2::jsonb)`,
-        [sender, JSON.stringify({ amount, transferUpdateId: dedupKey, depositRecordCid, holdingCid: c.contractId })],
+        [sender, JSON.stringify({ amount, transferUpdateId: dedupKey, depositRecordCid, holdingCid: c.contractId, requestedAt })],
       );
       log(`✓ deposited ${amount} ${INSTRUMENT_ID} for ${sender.split('::')[0]}… (cid ${depositRecordCid?.slice(0, 14)}…)`);
     } catch (err) {
@@ -283,7 +449,160 @@ async function tick(pool: Pool): Promise<void> {
       continue;
     }
 
+    // Notify the exchange backend so the user's tradeable balance reflects
+    // the on-chain deposit. Only reached when the deposits row is FRESH
+    // (the duplicate branch above does `continue` before getting here).
+    // Coin is hard-coded to 'USDT' regardless of the on-chain instrument
+    // symbol — the exchange backend's deposit/defi endpoint only knows the
+    // legacy EVM coin names, and rejects anything else (incl. our devnet 'CC').
+    await tryNotifyAndRecord(pool, {
+      partyId: sender,
+      amount,
+      coin: 'USDT',
+      txRef: dedupKey,
+    });
+
     seenHoldingCids.add(c.contractId);
+  }
+}
+
+/**
+ * Notify the exchange backend and write the outcome to the deposits row
+ * (exchange_credited_at on success, attempt counters + last error on
+ * failure). Also writes a one-line audit_log entry so the lifecycle is
+ * still grep-able from there.
+ */
+async function tryNotifyAndRecord(
+  pool: Pool,
+  args: { partyId: string; amount: string; coin: string; txRef: string },
+): Promise<void> {
+  const result = await notifyExchangeDeposit(args);
+  if (result.ok) {
+    await pool.query(
+      `UPDATE deposits
+          SET exchange_credited_at     = NOW(),
+              exchange_attempts        = exchange_attempts + 1,
+              exchange_last_attempt_at = NOW(),
+              exchange_last_error      = NULL
+        WHERE transfer_update_id = $1`,
+      [args.txRef],
+    );
+    await pool.query(
+      `INSERT INTO audit_log (user_party_id, action, details)
+         VALUES ($1, 'deposit.exchange.credited', $2::jsonb)`,
+      [args.partyId, JSON.stringify({ ...args, onChainSymbol: INSTRUMENT_SYMBOL, status: result.status, body: result.body })],
+    );
+    log(`✓ exchange credited ${args.amount} ${args.coin} for ${args.partyId.split('::')[0]}…`);
+  } else {
+    const errSummary = JSON.stringify(result.body).slice(0, 500);
+    await pool.query(
+      `UPDATE deposits
+          SET exchange_attempts        = exchange_attempts + 1,
+              exchange_last_attempt_at = NOW(),
+              exchange_last_error      = $2
+        WHERE transfer_update_id = $1`,
+      [args.txRef, `${result.status}: ${errSummary}`],
+    );
+    await pool.query(
+      `INSERT INTO audit_log (user_party_id, action, details)
+         VALUES ($1, 'deposit.exchange.failed', $2::jsonb)`,
+      [args.partyId, JSON.stringify({ ...args, onChainSymbol: INSTRUMENT_SYMBOL, status: result.status, body: result.body })],
+    );
+    log(`⚠ exchange notify failed (${result.status}) for ${args.partyId.split('::')[0]}…: ${errSummary.slice(0, 200)}`);
+  }
+}
+
+/**
+ * Pre-pass that finds deposits whose on-chain credit landed but whose
+ * exchange-API notify hasn't succeeded yet, and retries them.
+ *
+ * Skip rules:
+ *   • exchange_attempts >= MAX_EXCHANGE_ATTEMPTS  — operator intervention only
+ *   • exchange_last_attempt_at < RETRY_BACKOFF_MS ago — give it room to breathe
+ *
+ * Batched (LIMIT) so a backlog doesn't stall the new-holding scan.
+ */
+async function retryFailedExchangeNotifies(pool: Pool): Promise<void> {
+  const pending = await pool.query<{
+    user_party_id: string;
+    amount: string;
+    transfer_update_id: string;
+    exchange_attempts: number;
+  }>(
+    `SELECT user_party_id, amount::text AS amount, transfer_update_id, exchange_attempts
+       FROM deposits
+      WHERE exchange_credited_at IS NULL
+        AND exchange_attempts < $1
+        AND (exchange_last_attempt_at IS NULL
+             OR exchange_last_attempt_at < NOW() - ($2::text || ' milliseconds')::interval)
+        -- Don't credit split-change rows: those are internal bookkeeping
+        --   for partial withdrawals, not real user deposits. Exchange-backend
+        --   already saw the original deposit; sending /v1/deposit/defi for
+        --   the leftover would over-credit the user.
+        AND transfer_update_id NOT LIKE 'split-%'
+        -- Don't credit rows that have already been consumed by a later
+        --   withdrawal. (Belt-and-suspenders; this should never happen in
+        --   normal flow because credit precedes any withdraw.)
+        AND consumed_at IS NULL
+      ORDER BY exchange_attempts ASC, created_at ASC
+      LIMIT $3`,
+    [MAX_EXCHANGE_ATTEMPTS, String(RETRY_BACKOFF_MS), RETRY_BATCH_LIMIT],
+  );
+
+  if (pending.rowCount === 0) return;
+  log(`retry: ${pending.rowCount} pending exchange notif${pending.rowCount === 1 ? 'y' : 'ies'}`);
+
+  for (const row of pending.rows) {
+    await tryNotifyAndRecord(pool, {
+      partyId: row.user_party_id,
+      amount: row.amount,
+      coin: 'USDT',
+      txRef: row.transfer_update_id,
+    });
+  }
+}
+
+/**
+ * POST to the exchange-backend's deposit/defi endpoint to credit the user's
+ * tradeable balance after an on-chain DepositRecord has been created.
+ *
+ * Body shape matches the pre-refactor handleDeposit in src/index.ts:
+ *   { walletAddress, coin, amount, txnHash, network }
+ *
+ * `walletAddress` is the user's full Canton party id with `::` replaced by
+ * `.` — exchange-backend stores the party id in the user's email field with
+ * that same substitution (since `:` is illegal in an email local-part), and
+ * looks up the user by that string. Sending just the hint (`split('::')[0]`)
+ * gets a 400 "wallet address not linked to any Pi42 account".
+ *
+ * `txnHash` is the Canton transfer update id so retries are idempotent
+ * against the same deposit.
+ */
+async function notifyExchangeDeposit(args: {
+  partyId: string;
+  amount: string;
+  coin: string;
+  txRef: string;
+}): Promise<{ ok: boolean; status: number; body: unknown }> {
+  if (!EXCHANGE_DEPOSIT_URL) {
+    return { ok: false, status: 0, body: { error: 'EXCHANGE_DEPOSIT_URL not set' } };
+  }
+  try {
+    const res = await fetch(EXCHANGE_DEPOSIT_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        walletAddress: args.partyId,
+        coin: args.coin,
+        amount: Number(args.amount),
+        txnHash: args.txRef,
+        network: '0',
+      }),
+    });
+    const body = await res.json().catch(() => ({}));
+    return { ok: res.ok, status: res.status, body };
+  } catch (err) {
+    return { ok: false, status: 0, body: { error: (err as Error).message } };
   }
 }
 

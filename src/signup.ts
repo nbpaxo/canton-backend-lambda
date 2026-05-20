@@ -59,20 +59,6 @@ function validateSignup(body: SignupBody): string | null {
   return null;
 }
 
-/**
- * Derive the Canton party hint from an email address.
- *
- * Frontend (src/lib/partyId.ts in trading-terminal-vite) uses the IDENTICAL
- * derivation so it can compute the party id locally — `/v1/user/info` only
- * returns the email, not the party id. KEEP THESE IN SYNC.
- *
- *   email → lowercase → split('@')[0] → replace([^a-z0-9_-]+, '_') → trim _ → slice(0, 64)
- */
-export function partyHintFromEmail(email: string): string {
-  const local = email.toLowerCase().trim().split('@')[0] ?? '';
-  return local.replace(/[^a-z0-9_-]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 64);
-}
-
 // ─── KC Admin helpers ───────────────────────────────────────────────────────
 
 let kcAdminTokenCache: { token: string; expiry: number } | null = null;
@@ -143,16 +129,6 @@ router.post('/signup', async (req: Request, res: Response) => {
     const email = body.email.toLowerCase().trim();
     const inviteCode = body.inviteCode.trim().toUpperCase();
 
-    // Canton party hint is derived from the email's local-part so the
-    // frontend can compute the same party id from /v1/user/info's email
-    // without an extra round-trip. Keep `partyHintFromEmail` here aligned
-    // with `partyIdFromEmail` in trading-terminal-vite/src/lib/partyId.ts.
-    const partyHint = partyHintFromEmail(email);
-    if (!partyHint || partyHint.length < 1) {
-      res.status(400).json({ error: 'Email local-part is empty after sanitization' });
-      return;
-    }
-
     // 1. Validate invite code
     const invite = await getInviteCode(inviteCode);
     if (!invite) {
@@ -215,8 +191,9 @@ router.post('/signup', async (req: Request, res: Response) => {
       return;
     }
 
-    // 4. Get the Keycloak UUID (sub) — kept in our users table for future
-    //    JWT-verifying auth, but NOT used as the Canton party hint.
+    // 4. Get the Keycloak UUID (sub) — used as the Canton partyIdHint so
+    //    Splice's wallet UI on the validator (which resolves a user's party
+    //    by their Keycloak `sub`) can find this party.
     const kcUserRes = await fetch(
       `${KEYCLOAK_BASE}/admin/realms/${KEYCLOAK_REALM}/users?username=${encodeURIComponent(username)}&exact=true`,
       { headers: { Authorization: `Bearer ${kcAdminToken}` } },
@@ -228,11 +205,15 @@ router.post('/signup', async (req: Request, res: Response) => {
       return;
     }
 
+    // partyIdHint allowed chars are [A-Za-z0-9_-]; Keycloak UUIDs (lowercase
+    // hex + '-') already satisfy this, so no sanitization needed.
+    const partyHint = kcUuid;
+
     console.log(
       `[signup] Keycloak user created: username=${username} email=${email} sub=${kcUuid} partyHint=${partyHint}`,
     );
 
-    // 5. Allocate Canton party with hint derived from email (see top of fn).
+    // 5. Allocate Canton party with hint = Keycloak sub.
     const cantonAdminToken = await getAdminToken();
     const partyRes = await fetch(`${CANTON_LEDGER_API}/v2/parties`, {
       method: 'POST',

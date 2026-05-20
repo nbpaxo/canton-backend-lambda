@@ -16,10 +16,8 @@
   "exclude": [
     "node_modules",
     "dist",
-    // index.ts is the AWS Lambda router; left untouched on the devnet
-    // branch (we're local-first). It still references templates / SDK
-    // methods that have been deleted. Re-include after a proper Lambda
-    // wrapper rewrite, ideally via serverless-express around server.ts.
-    "src/index.ts"
+    // The legacy localnet Lambda router (pre-devnet) is archived here.
+    // Kept on disk for reference; never built or shipped.
+    "src/index.legacy-localnet.ts.bak"
   ]
 }
