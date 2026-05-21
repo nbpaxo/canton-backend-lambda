@@ -202,6 +202,157 @@ export async function getEventsByContractId(
   return res.json() as Promise<{ created?: { offset?: number; createdEvent?: { offset?: number; [k: string]: unknown }; [k: string]: unknown } }>;
 }
 
+/**
+ * Stream creates of a given interface (e.g. CIP-56 Holding) for `party`
+ * in the offset range `(beginExclusive, endInclusive]`.
+ *
+ * Canton 3's `/v2/updates/flats` is a streaming/range endpoint — given a
+ * bounded interval it returns the transactions that happened in that
+ * window, each carrying its events. We pull out the CreatedEvent rows
+ * that match the requested party + interface and shape them into the
+ * same `ActiveContract` envelope the rest of the SDK already uses, so
+ * callers don't have to switch on the source.
+ *
+ * Response parsing is defensive: the JSON API has been observed to
+ * return either a JSON array of update wrappers OR newline-delimited
+ * JSON in the wild, depending on the deployment's chunked-transfer
+ * settings. Both are handled here.
+ *
+ * Caller is responsible for persisting `endInclusive` as the next
+ * `beginExclusive` after a successful tick — this function is pure read.
+ */
+export async function getCreatedEventsByOffsetRange(
+  config: CantonSdkConfig,
+  token: string,
+  args: {
+    party: string;
+    interfaceId: string;
+    beginExclusive: number;
+    endInclusive: number;
+  },
+): Promise<ActiveContract[]> {
+  const body = {
+    beginExclusive: args.beginExclusive,
+    endInclusive: args.endInclusive,
+    updateFormat: {
+      includeTransactions: {
+        eventFormat: {
+          filtersByParty: {
+            [args.party]: {
+              cumulative: [
+                {
+                  identifierFilter: {
+                    InterfaceFilter: {
+                      value: {
+                        interfaceId: args.interfaceId,
+                        includeInterfaceView: true,
+                        includeCreatedEventBlob: false,
+                      },
+                    },
+                  },
+                },
+              ],
+            },
+          },
+          verbose: false,
+        },
+        // Flat-style — we only need the events list, not the full tree.
+        transactionShape: 'TRANSACTION_SHAPE_ACS_DELTA',
+      },
+    },
+  };
+
+  const res = await fetch(`${config.cantonLedgerApi}/v2/updates/flats`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    throw new Error(`updates/flats failed (${res.status}): ${await res.text()}`);
+  }
+
+  const text = await res.text();
+  return parseFlatUpdatesResponse(text);
+}
+
+/**
+ * Parse the response from `/v2/updates/flats` into ActiveContract envelopes.
+ *
+ * Accepts three observed shapes:
+ *   - JSON array:                     `[ { update: { Transaction: { ... } } }, ... ]`
+ *   - NDJSON:                         one update wrapper per line
+ *   - Single-object stream that ends: `{ ... }` (small ranges, no newline)
+ */
+function parseFlatUpdatesResponse(text: string): ActiveContract[] {
+  if (!text.trim()) return [];
+
+  // Try parsing as a single JSON value first (covers array + single-object cases).
+  const wrappers: unknown[] = [];
+  try {
+    const parsed = JSON.parse(text);
+    if (Array.isArray(parsed)) wrappers.push(...parsed);
+    else wrappers.push(parsed);
+  } catch {
+    // Fall back to NDJSON.
+    for (const line of text.split('\n')) {
+      const s = line.trim();
+      if (!s) continue;
+      try {
+        wrappers.push(JSON.parse(s));
+      } catch {
+        // skip malformed line
+      }
+    }
+  }
+
+  const out: ActiveContract[] = [];
+  for (const w of wrappers) {
+    const obj = (w ?? {}) as Record<string, unknown>;
+    // Possible shapes:
+    //   { update: { Transaction: { value: { events: [...] } } } }
+    //   { Transaction: { value: { events: [...] } } }
+    //   { transaction: { events: [...] } }
+    const tx =
+      ((obj.update as { Transaction?: { value?: { events?: unknown[] } } } | undefined)?.Transaction?.value) ??
+      ((obj.Transaction as { value?: { events?: unknown[] } } | undefined)?.value) ??
+      (obj.transaction as { events?: unknown[] } | undefined);
+    if (!tx) continue;
+
+    const events = (tx.events ?? []) as unknown[];
+    for (const ev of events) {
+      // CreatedEvent envelope:
+      //   { CreatedEvent: { value: { contractId, templateId, payload, interfaceViews? } } }
+      //   { CreatedEvent: { contractId, templateId, ... } }   (rare flatter form)
+      const evObj = (ev ?? {}) as Record<string, unknown>;
+      const ce = (evObj.CreatedEvent as { value?: Record<string, unknown> } | Record<string, unknown> | undefined);
+      if (!ce) continue;
+      const inner = ((ce as { value?: Record<string, unknown> }).value ?? ce) as Record<string, unknown>;
+      const contractId = inner.contractId as string | undefined;
+      const templateId = inner.templateId as string | undefined;
+      if (!contractId || !templateId) continue;
+      const interfaceViews = inner.interfaceViews as
+        | Array<{ viewValue?: Record<string, unknown> }>
+        | undefined;
+      const interfaceView = interfaceViews?.[0]?.viewValue;
+      out.push({
+        contractId,
+        templateId,
+        payload: (inner.createArguments ?? inner.createArgument ?? inner.payload ?? {}) as Record<
+          string,
+          unknown
+        >,
+        interfaceView,
+      });
+    }
+  }
+  return out;
+}
+
+/** Public for the watcher (it can persist this as the next beginExclusive). */
+export async function getLedgerEnd(config: CantonSdkConfig, token: string): Promise<number> {
+  return getLedgerEndOffset(config, token);
+}
+
 /** Fetch the full transaction tree for an offset (LEDGER_EFFECTS shape). */
 export async function getTransactionTreeByOffset(
   config: CantonSdkConfig,

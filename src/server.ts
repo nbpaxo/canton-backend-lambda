@@ -6,7 +6,12 @@
  *             src/index.ts when AWS_LAMBDA_FUNCTION_NAME is set.
  */
 
-import express, { type ErrorRequestHandler, type Request, type Response } from 'express';
+import express, {
+  type ErrorRequestHandler,
+  type Request,
+  type Response,
+  type NextFunction,
+} from 'express';
 import cors from 'cors';
 import routes from './routes.js';
 import signupRoutes from './signup.js';
@@ -18,9 +23,76 @@ import withdrawRoutes from './api/withdraw.js';
 import withdrawalsRoutes from './api/withdrawals.js';
 import { PORT, CORS_ORIGINS } from './config.js';
 
+// ─── Cold-start banner ───────────────────────────────────────────────────
+// Logged once per Lambda container init (= once per cold start). Gives
+// CloudWatch a single grep-able anchor line per fresh container so we can
+// correlate subsequent request logs to the right environment + commit.
+// Use console.log (not console.info) — every Lambda Node runtime guarantees
+// stdout capture; some older runtimes drop info-level by default.
+console.log(JSON.stringify({
+  level: 'info',
+  type: 'cold_start',
+  at: new Date().toISOString(),
+  function: process.env.AWS_LAMBDA_FUNCTION_NAME ?? 'local',
+  region: process.env.AWS_REGION ?? 'unknown',
+  // host of the DATABASE_URL (no creds) — handy when pointing at the
+  // wrong RDS instance is the actual bug.
+  databaseHost: process.env.DATABASE_URL?.match(/@([^:/]+)/)?.[1] ?? '<unset>',
+  authMode: process.env.AUTH_MODE ?? 'open',
+}));
+
+// Surface any error that escapes the Express pipeline — these would
+// otherwise crash the container silently between invocations.
+process.on('uncaughtException', (err) => {
+  console.error(JSON.stringify({
+    level: 'fatal',
+    type: 'uncaughtException',
+    message: err.message,
+    stack: err.stack,
+  }));
+});
+process.on('unhandledRejection', (reason) => {
+  console.error(JSON.stringify({
+    level: 'fatal',
+    type: 'unhandledRejection',
+    reason: reason instanceof Error
+      ? { message: reason.message, stack: reason.stack }
+      : String(reason),
+  }));
+});
+
 const app = express();
 
 app.use(cors({ origin: CORS_ORIGINS, credentials: true }));
+
+// ─── Request logger ──────────────────────────────────────────────────────
+// One line per request, written when the response finishes. Structured
+// JSON so CloudWatch Logs Insights can query it directly (eg.
+// `filter type="request" and status>=400 | sort @timestamp desc`).
+// Mounted BEFORE any router so 404s are also captured.
+app.use((req: Request, res: Response, next: NextFunction) => {
+  const start = Date.now();
+  res.on('finish', () => {
+    console.log(JSON.stringify({
+      level: 'info',
+      type: 'request',
+      method: req.method,
+      path: req.path,
+      status: res.statusCode,
+      durationMs: Date.now() - start,
+      // X-Amzn-Trace-Id is set by API Gateway; fall back to anything the
+      // caller forwarded so log lines can be correlated end-to-end.
+      requestId:
+        (req.headers['x-amzn-trace-id'] as string | undefined)
+        ?? (req.headers['x-request-id'] as string | undefined)
+        ?? '',
+      // x-party-id is the open-auth identifier our endpoints use.
+      partyId: (req.headers['x-party-id'] as string | undefined) ?? null,
+      contentLength: Number(res.getHeader('content-length') ?? 0),
+    }));
+  });
+  next();
+});
 
 // KYC webhook must read the raw body for HMAC verification — so we mount
 // the KYC router BEFORE the global JSON parser. The webhook handler inside

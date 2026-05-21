@@ -42,7 +42,9 @@ import {
 import {
   collectExerciseEvents,
   getActiveContracts,
+  getCreatedEventsByOffsetRange,
   getEventsByContractId,
+  getLedgerEnd,
   getTransactionTreeByOffset,
   submitCommand,
   extractCreatedContractId,
@@ -52,9 +54,11 @@ import { resolveOperatorCantonId } from '../canton-sdk/operator.js';
 
 const INTERVAL_MS = Number(process.env.WATCHER_INTERVAL_MS ?? 5_000);
 // Stop hammering the exchange API after this many failed attempts per deposit.
-// Operator can reset by zeroing exchange_attempts manually for permanent
-// blockers (e.g. user account not yet linked at exchange side).
-const MAX_EXCHANGE_ATTEMPTS = Number(process.env.EXCHANGE_MAX_ATTEMPTS ?? 20);
+// Default kept low so persistent failures surface fast in the ops queue
+// instead of churning in the retry loop. Operator can reset by zeroing
+// exchange_attempts manually in SQL once the underlying blocker is fixed
+// (typical case: user account not yet linked at the exchange side).
+const MAX_EXCHANGE_ATTEMPTS = Number(process.env.EXCHANGE_MAX_ATTEMPTS ?? 2);
 // Don't retry more often than this — at 5s interval we'd otherwise hit
 // every tick; for transient errors it's fine, but for a 4xx we want a back-off.
 const RETRY_BACKOFF_MS = Number(process.env.EXCHANGE_RETRY_BACKOFF_MS ?? 30_000);
@@ -121,11 +125,39 @@ async function main(): Promise<void> {
 }
 
 async function sanityCheckDb(pool: Pool): Promise<void> {
+  const off = await readCheckpoint(pool);
+  log(`db checkpoint: ${off ?? '(none — will bootstrap via ACS query on first tick)'}`);
+}
+
+/**
+ * Read the persisted Canton ledger offset. Returns null when the row is
+ * empty/absent — caller treats that as "bootstrap needed" and seeds the
+ * checkpoint with the current ledger end after a one-time ACS query.
+ *
+ * Ledger offsets in Canton 3 are monotonic integers; we store them as
+ * TEXT to stay compatible with the existing schema (which was created
+ * before we committed to the offset type) and parse to Number here.
+ */
+async function readCheckpoint(pool: Pool): Promise<number | null> {
   const r = await pool.query<{ last_offset: string }>(
     `SELECT last_offset FROM watcher_checkpoint WHERE id = 1`,
   );
-  const off = r.rows[0]?.last_offset ?? '';
-  log(`db checkpoint: "${off || '(none)'}"`);
+  const raw = (r.rows[0]?.last_offset ?? '').trim();
+  if (!raw) return null;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+/** Persist the latest known ledger end as the next beginExclusive. */
+async function writeCheckpoint(pool: Pool, offset: number): Promise<void> {
+  await pool.query(
+    `INSERT INTO watcher_checkpoint (id, last_offset, updated_at)
+       VALUES (1, $1, NOW())
+     ON CONFLICT (id) DO UPDATE
+       SET last_offset = EXCLUDED.last_offset,
+           updated_at  = EXCLUDED.updated_at`,
+    [String(offset)],
+  );
 }
 
 /**
@@ -168,11 +200,16 @@ async function backfillSourceHoldingCids(pool: Pool): Promise<void> {
  *  0. Retry any deposits whose on-chain credit succeeded but whose
  *     exchange-backend notify failed last time (transient 5xx, network,
  *     or recoverable 4xx where the operator has since fixed the link).
- *  1. List CIP-56 Holdings owned by vaultPool.
+ *  1. Fetch new Holdings since the last persisted checkpoint:
+ *       - bootstrap path (checkpoint empty): ACS query of all active
+ *         vaultPool Holdings, then write current ledger end as checkpoint
+ *       - incremental path: stream creates in (lastOffset, ledgerEnd]
+ *         via /v2/updates/flats
  *  2. Filter to Amulet/CC + unlocked + not-yet-seen.
  *  3. For each, resolve the originating transfer's update_id + sender
  *     party from the on-chain tx tree.
  *  4. Branch on KYC status; create DepositRecord or write to held_deposits.
+ *  5. Persist the new ledger end so the next tick only sees deltas.
  */
 async function tick(pool: Pool): Promise<void> {
   await retryFailedExchangeNotifies(pool);
@@ -180,12 +217,35 @@ async function tick(pool: Pool): Promise<void> {
   const opToken = await getOperatorToken(sdkConfig);
   const opUserId = await resolveOperatorCantonId(sdkConfig);
 
-  const contracts = await getActiveContracts(
-    sdkConfig,
-    opToken,
-    PARTIES.vaultPool,
-    { interfaceId: IFACE_HOLDING },
-  );
+  const ledgerEnd = await getLedgerEnd(sdkConfig, opToken);
+  const lastOffset = await readCheckpoint(pool);
+
+  let contracts;
+  if (lastOffset == null) {
+    // Bootstrap on first run — one-time full ACS scan so any pre-existing
+    // unprocessed Holdings get picked up. Dedup via source_holding_cid
+    // keeps it safe if the watcher restarts mid-bootstrap.
+    log(`bootstrap: full ACS scan at offset ${ledgerEnd}`);
+    contracts = await getActiveContracts(
+      sdkConfig, opToken, PARTIES.vaultPool, { interfaceId: IFACE_HOLDING },
+    );
+  } else if (lastOffset >= ledgerEnd) {
+    // Nothing new since last tick. Skip the network roundtrip + DB writes.
+    return;
+  } else {
+    // Incremental: only the creates that happened in this offset window.
+    // Skips the full ACS scan, which is what makes growth O(deltas) instead
+    // of O(active Holdings).
+    contracts = await getCreatedEventsByOffsetRange(sdkConfig, opToken, {
+      party: PARTIES.vaultPool,
+      interfaceId: IFACE_HOLDING,
+      beginExclusive: lastOffset,
+      endInclusive: ledgerEnd,
+    });
+    if (contracts.length > 0) {
+      log(`incremental: ${contracts.length} creates in (${lastOffset}, ${ledgerEnd}]`);
+    }
+  }
 
   for (const c of contracts) {
     if (seenHoldingCids.has(c.contractId)) continue;
@@ -464,6 +524,13 @@ async function tick(pool: Pool): Promise<void> {
 
     seenHoldingCids.add(c.contractId);
   }
+
+  // Persist the ledger end we processed. Next tick uses this as
+  // beginExclusive — anything that lands after this offset is what we'll
+  // see. Done at the end so a mid-tick crash doesn't advance the cursor
+  // past Holdings we haven't credited yet; on restart we redo the same
+  // window and the source_holding_cid dedup makes re-processing safe.
+  await writeCheckpoint(pool, ledgerEnd);
 }
 
 /**

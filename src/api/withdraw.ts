@@ -91,6 +91,23 @@ router.post('/withdraw', json(), async (req: Request, res: Response) => {
   // both. See normalizePartyId() in auth.ts.
   body.partyId = normalizePartyId(body.partyId);
 
+  // Step-by-step logger scoped to this request. Lets us correlate where
+  // a withdraw died even when the DB pool is unhealthy and recordFailed-
+  // Attempt itself can't write. The string `[withdraw]` is grep-friendly.
+  const wlog = (stage: string, extra: Record<string, unknown> = {}): void => {
+    // eslint-disable-next-line no-console
+    console.log(JSON.stringify({
+      level: 'info',
+      type: 'withdraw_step',
+      stage,
+      approvalId: body.approvalId,
+      partyId: body.partyId,
+      amount: body.amount,
+      ...extra,
+    }));
+  };
+  wlog('start');
+
   const pool = getPool();
   // Strip the loopAuth field — signatures + pubkeys shouldn't end up in
   // the audit/failure tables.
@@ -106,7 +123,9 @@ router.post('/withdraw', json(), async (req: Request, res: Response) => {
   let auth;
   try {
     auth = await authenticateWithdraw(req, { approvalId: body.approvalId });
+    wlog('auth_ok', { authMethod: auth.authMethod });
   } catch (err) {
+    wlog('auth_failed', { error: (err as Error).message });
     await recordFailedAttempt(pool, {
       approvalId: body.approvalId,
       userPartyId: body.partyId,
@@ -179,8 +198,10 @@ router.post('/withdraw', json(), async (req: Request, res: Response) => {
          VALUES ($1, $2, $3, $4, 'pending')`,
       [body.approvalId, approval.partyId, approval.amount, approval.nonce],
     );
+    wlog('reserved');
   } catch (err) {
     if ((err as { code?: string }).code === '23505') {
+      wlog('replay');
       await recordFailedAttempt(pool, {
         approvalId: body.approvalId,
         userPartyId: approval.partyId,
@@ -192,20 +213,24 @@ router.post('/withdraw', json(), async (req: Request, res: Response) => {
       });
       return res.status(409).json({ error: 'approval already processed' });
     }
+    wlog('reserve_failed', { error: (err as Error).message });
     throw err;
   }
 
-  // 5. Finalize at exchange-backend FIRST. If this fails the on-chain side
-  //    never runs — so funds can't leak with no debit. If this succeeds
-  //    and the on-chain side later fails, we'll be in a recoverable state:
-  //    `withdrawals.state='finalized'` with no `on_chain_update_id`, ready
-  //    for a retry pass to drive to completion.
+  // ── STEP A: Exchange-backend finalize FIRST. ─────────────────────────
+  // Strict order: NOTHING on-chain happens until exchange has confirmed
+  // it has debited the user's trading wallet. If this errors, the
+  // approval row stays in 'failed' state, a row is recorded in
+  // failed_withdraw_attempts (failure_step='exchange-api-fail') with the
+  // full request payload, and the UI gets a "cannot withdraw" response.
+  wlog('exchange_call_start', { url: EXCHANGE_WITHDRAW_URL });
   const finalize = await postExchangeWithdrawFinalize({
     partyId: approval.partyId,
     amount: approval.amount,
     nonce: approval.nonce,
     approvalId: body.approvalId,
   });
+  wlog('exchange_call_done', { ok: finalize.ok, status: finalize.status });
   if (!finalize.ok) {
     const reason = `exchange finalize ${finalize.status}: ${JSON.stringify(finalize.body).slice(0, 400)}`;
     await pool.query(
@@ -226,11 +251,31 @@ router.post('/withdraw', json(), async (req: Request, res: Response) => {
       userPartyId: approval.partyId,
       amount: approval.amount,
       nonce: approval.nonce,
-      failureStep: 'exchange',
+      failureStep: 'exchange-api-fail',
       failureReason: reason,
-      requestPayload: safePayload,
+      // Capture the FULL diagnostic envelope so ops can reconstruct what
+      // we attempted: the incoming user request, the exact JSON we posted
+      // to exchange-backend (txnHash, walletAddress, coin, amount, nonce,
+      // approvalId), and exchange-backend's response.
+      requestPayload: {
+        incoming: safePayload,
+        exchangeRequest: {
+          url: finalize.url,
+          method: 'POST',
+          body: finalize.requestPayload,
+        },
+        exchangeResponse: {
+          status: finalize.status,
+          body: finalize.body,
+        },
+      },
     });
-    return res.status(502).json({ error: 'exchange finalize failed', details: finalize.body });
+    return res.status(502).json({
+      error: 'cannot_withdraw',
+      message: 'Cannot withdraw at this time. Your funds have not been moved. Please try again later.',
+      stage: 'exchange-api-fail',
+      details: finalize.body,
+    });
   }
 
   await pool.query(
@@ -245,11 +290,19 @@ router.post('/withdraw', json(), async (req: Request, res: Response) => {
     [approval.partyId, JSON.stringify({ approvalId: body.approvalId, amount: approval.amount })],
   );
 
-  // 6. On chain. Mirrors exchange-v2/backend/src/services/withdraw.ts:
-  //    transfer FIRST (so user sees money), then DB-mark consumed (atomic),
-  //    then best-effort DepositRecord archive on chain. If the transfer
-  //    fails, the row stays in 'finalized' state with failure_reason set
-  //    — a retry pass (TODO) can drive it to completion later.
+  // ── STEP B: On chain. ────────────────────────────────────────────────
+  // Exchange has now debited the user's trading wallet; we owe them the
+  // CC on chain. Mirrors exchange-v2/backend/src/services/withdraw.ts:
+  // transfer FIRST (so user sees money), then DB-mark consumed (atomic),
+  // then best-effort DepositRecord archive on chain.
+  //
+  // If this errors, exchange has ALREADY debited — the withdrawals row
+  // sits in 'finalized' with failure_reason, a row is added to
+  // failed_withdraw_attempts (failure_step='on-chain-failed') with the
+  // full payload + error, and the UI gets the "contact support" message
+  // so the user knows their balance moved but settlement didn't. A retry
+  // pass (TODO) can drive 'finalized' rows to completion.
+  wlog('on_chain_start');
   try {
     const onChain = await runOnChainWithdraw({
       pool,
@@ -257,6 +310,7 @@ router.post('/withdraw', json(), async (req: Request, res: Response) => {
       userParty: approval.partyId,
       amount: approval.amount,
     });
+    wlog('on_chain_done', { transferUpdateId: onChain.transferUpdateId });
 
     await pool.query(
       `UPDATE withdrawals
@@ -286,6 +340,7 @@ router.post('/withdraw', json(), async (req: Request, res: Response) => {
       ],
     );
 
+    wlog('success');
     return res.json({
       success: true,
       approvalId: body.approvalId,
@@ -296,6 +351,7 @@ router.post('/withdraw', json(), async (req: Request, res: Response) => {
       profitAmount: onChain.profitAmount,
     });
   } catch (err) {
+    wlog('on_chain_failed', { error: (err as Error).message });
     // Exchange has already debited; row stays in 'finalized' with a
     // failure_reason. TODO: retry pass that picks up `finalized` rows
     // older than N seconds and re-runs runOnChainWithdraw — same pattern
@@ -325,12 +381,34 @@ router.post('/withdraw', json(), async (req: Request, res: Response) => {
       userPartyId: approval.partyId,
       amount: approval.amount,
       nonce: approval.nonce,
-      failureStep: 'on_chain',
+      failureStep: 'on-chain-failed',
       failureReason: reason,
-      requestPayload: safePayload,
+      // Diagnostic envelope: the incoming user request, the (successful)
+      // exchange-backend call we made before attempting on-chain, and the
+      // on-chain error itself. Exchange has already debited at this point
+      // — including the exchange request/response is critical context for
+      // manual reconciliation (it shows exactly what was debited).
+      requestPayload: {
+        incoming: safePayload,
+        exchangeRequest: {
+          url: finalize.url,
+          method: 'POST',
+          body: finalize.requestPayload,
+        },
+        exchangeResponse: {
+          status: finalize.status,
+          body: finalize.body,
+        },
+        onChainError: {
+          message: reason,
+          stack: (err as Error).stack,
+        },
+      },
     });
     return res.status(500).json({
-      error: 'exchange finalized but on-chain transfer failed',
+      error: 'on_chain_failed',
+      message: 'Issue in transferring on chain. Please contact support — help@mperps.xyz',
+      stage: 'on-chain-failed',
       details: reason,
       state: 'finalized',
     });
@@ -344,9 +422,28 @@ router.post('/withdraw', json(), async (req: Request, res: Response) => {
  *   - decide between unlock vs manual on-chain settlement
  *   - replay the request if the cause is now fixed
  *
- * Best-effort: if the INSERT itself fails, we log and swallow — we still
- * want the caller to receive the original 4xx/5xx response.
+ * Strict-recording contract:
+ *   - Caller's 4xx/5xx response to the user is NEVER blocked by a
+ *     recording failure — we don't re-throw, so the user always gets
+ *     their HTTP response.
+ *   - If the primary INSERT fails (e.g. CHECK violation, pool
+ *     exhausted), we log LOUDLY (console.error) AND attempt a
+ *     last-ditch audit_log INSERT so the failure is at least visible
+ *     in `audit_log`. The previous version silently swallowed errors
+ *     with console.warn — the symptom in prod was "exchange call
+ *     failed but failed_withdraw_attempts has no row", which is the
+ *     exact mode this now defends against.
  */
+type WithdrawFailureStep =
+  | 'auth'
+  | 'lookup'
+  | 'replay'
+  // 2026-05-20 refactor — canonical values for new failures. Legacy
+  // 'exchange'/'on_chain' stay in the CHECK constraint for back-compat
+  // but are no longer written by new code.
+  | 'exchange-api-fail'
+  | 'on-chain-failed';
+
 async function recordFailedAttempt(
   pool: Pool,
   args: {
@@ -354,7 +451,7 @@ async function recordFailedAttempt(
     userPartyId?: string;
     amount?: string;
     nonce?: string;
-    failureStep: 'auth' | 'lookup' | 'replay' | 'exchange' | 'on_chain';
+    failureStep: WithdrawFailureStep;
     failureReason: string;
     requestPayload: unknown;
   },
@@ -374,9 +471,54 @@ async function recordFailedAttempt(
         JSON.stringify(args.requestPayload),
       ],
     );
-  } catch (e) {
     // eslint-disable-next-line no-console
-    console.warn(`[withdraw] failed to record failed_withdraw_attempt: ${(e as Error).message}`);
+    console.log(
+      `[withdraw] recorded failed_withdraw_attempt step=${args.failureStep} approval=${args.approvalId ?? '<none>'}`,
+    );
+    return;
+  } catch (primaryErr) {
+    // eslint-disable-next-line no-console
+    console.error(
+      `[withdraw] CRITICAL: failed to INSERT failed_withdraw_attempts row ` +
+        `(step=${args.failureStep} approval=${args.approvalId ?? '<none>'}) — ` +
+        `falling back to audit_log:`,
+      {
+        message: (primaryErr as Error).message,
+        stack: (primaryErr as Error).stack,
+      },
+    );
+  }
+
+  // Last-ditch: at least leave a trail in audit_log so ops can find it.
+  try {
+    await pool.query(
+      `INSERT INTO audit_log (user_party_id, action, details)
+         VALUES ($1, 'withdraw.failure.record_missed', $2::jsonb)`,
+      [
+        args.userPartyId ?? null,
+        JSON.stringify({
+          approvalId: args.approvalId,
+          amount: args.amount,
+          nonce: args.nonce,
+          failureStep: args.failureStep,
+          failureReason: args.failureReason.slice(0, 2000),
+          requestPayload: args.requestPayload,
+          note: 'INSERT into failed_withdraw_attempts threw; this audit_log row is the fallback record',
+        }),
+      ],
+    );
+  } catch (auditErr) {
+    // eslint-disable-next-line no-console
+    console.error(
+      `[withdraw] DOUBLE-CRITICAL: audit_log fallback also failed — manual reconciliation needed`,
+      {
+        message: (auditErr as Error).message,
+        approval: args.approvalId,
+        step: args.failureStep,
+        original_failure_reason: args.failureReason,
+        request_payload: args.requestPayload,
+      },
+    );
   }
 }
 
@@ -850,6 +992,14 @@ interface ExchangeFinalizeResult {
   ok: boolean;
   status: number;
   body: unknown;
+  /** The exact JSON we POSTed to exchange-backend's /v1/withdraw/defi.
+   *  Always returned (even on error) so failure recording can capture it
+   *  in `failed_withdraw_attempts.request_payload`. Includes the txnHash,
+   *  walletAddress, coin, amount, nonce, and approvalId fields exactly
+   *  as sent on the wire. */
+  requestPayload: Record<string, unknown>;
+  /** Endpoint URL hit (or null if EXCHANGE_WITHDRAW_URL was unset). */
+  url: string | null;
 }
 
 async function postExchangeWithdrawFinalize(args: {
@@ -858,31 +1008,47 @@ async function postExchangeWithdrawFinalize(args: {
   nonce: string;
   approvalId: string;
 }): Promise<ExchangeFinalizeResult> {
-  if (!EXCHANGE_WITHDRAW_URL) {
-    return { ok: false, status: 0, body: { error: 'EXCHANGE_WITHDRAW_URL not set' } };
-  }
   // Body shape (current exchange-backend contract):
   //   { txnHash, walletAddress, coin, amount, nonce, approvalId }
   // approvalId MUST be a number (exchange-backend indexes by numeric id;
   // a string-typed value is rejected).
   const txnHash = `cb-w-${args.approvalId}`;
   const approvalIdNum = Number(args.approvalId);
-  if (!Number.isFinite(approvalIdNum)) {
-    return { ok: false, status: 0, body: { error: `non-numeric approvalId: ${args.approvalId}` } };
-  }
-  const payload = {
+
+  // Build the payload up-front so we can return it even on early-out
+  // branches (no URL configured, non-numeric approval id, network throw).
+  const requestPayload: Record<string, unknown> = {
     txnHash,
     walletAddress: args.partyId,
     coin: 'USDT',
     amount: Number(args.amount),
     nonce: args.nonce,
-    approvalId: approvalIdNum,
+    approvalId: Number.isFinite(approvalIdNum) ? approvalIdNum : args.approvalId,
   };
+
+  if (!EXCHANGE_WITHDRAW_URL) {
+    return {
+      ok: false,
+      status: 0,
+      body: { error: 'EXCHANGE_WITHDRAW_URL not set' },
+      requestPayload,
+      url: null,
+    };
+  }
+  if (!Number.isFinite(approvalIdNum)) {
+    return {
+      ok: false,
+      status: 0,
+      body: { error: `non-numeric approvalId: ${args.approvalId}` },
+      requestPayload,
+      url: EXCHANGE_WITHDRAW_URL,
+    };
+  }
   try {
     const res = await fetch(EXCHANGE_WITHDRAW_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
+      body: JSON.stringify(requestPayload),
     });
     const body = await res.json().catch(() => ({}));
     if (!res.ok) {
@@ -890,19 +1056,25 @@ async function postExchangeWithdrawFinalize(args: {
       console.warn('[withdraw] exchange finalize rejected', {
         url: EXCHANGE_WITHDRAW_URL,
         status: res.status,
-        payload,
+        payload: requestPayload,
         responseBody: body,
       });
     }
-    return { ok: res.ok, status: res.status, body };
+    return { ok: res.ok, status: res.status, body, requestPayload, url: EXCHANGE_WITHDRAW_URL };
   } catch (err) {
     // eslint-disable-next-line no-console
     console.warn('[withdraw] exchange finalize errored', {
       url: EXCHANGE_WITHDRAW_URL,
-      payload,
+      payload: requestPayload,
       error: (err as Error).message,
     });
-    return { ok: false, status: 0, body: { error: (err as Error).message } };
+    return {
+      ok: false,
+      status: 0,
+      body: { error: (err as Error).message },
+      requestPayload,
+      url: EXCHANGE_WITHDRAW_URL,
+    };
   }
 }
 

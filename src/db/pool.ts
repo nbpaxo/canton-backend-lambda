@@ -37,6 +37,8 @@ export function getPool(): pg.Pool {
   // rejectUnauthorized: false is ignored — symptom is
   // SELF_SIGNED_CERT_IN_CHAIN.
   const wantSsl = /sslmode=(require|prefer|verify-ca|verify-full|allow)/i.test(u.search);
+  const inLambda = !!process.env.AWS_LAMBDA_FUNCTION_NAME;
+
   pool = new pg.Pool({
     host: u.hostname,
     port: u.port ? Number(u.port) : 5432,
@@ -44,12 +46,42 @@ export function getPool(): pg.Pool {
     password: decodeURIComponent(u.password),
     database: u.pathname.replace(/^\//, ''),
     ssl: wantSsl ? { rejectUnauthorized: false } : undefined,
-    max: Number(process.env.PG_POOL_MAX ?? 10),
-    idleTimeoutMillis: 30_000,
+    // Tighter in Lambda: each invocation is short-lived and a stuck
+    // connection blocks the whole container. Smaller pool, short
+    // connect+query+statement timeouts so failures surface fast enough
+    // for the catch handlers + recordFailedAttempt to run before Lambda
+    // kills the container.
+    max: Number(process.env.PG_POOL_MAX ?? (inLambda ? 3 : 10)),
+    idleTimeoutMillis: inLambda ? 5_000 : 30_000,
+    // Hard caps so a dead/unreachable RDS doesn't silently consume the
+    // entire 30s Lambda timeout without ever logging anything:
+    connectionTimeoutMillis: inLambda ? 5_000 : 10_000,
+    // Cap individual queries — anything beyond this is fatal at the
+    // server side, so we get a clean error instead of a hang.
+    statement_timeout: inLambda ? 15_000 : 30_000,
+    query_timeout: inLambda ? 15_000 : 30_000,
   });
+
   pool.on('error', (err) => {
-    console.error('[pg] unexpected pool error:', err);
+    // eslint-disable-next-line no-console
+    console.error(JSON.stringify({
+      level: 'error',
+      type: 'pg_pool_error',
+      message: (err as Error).message,
+      stack: (err as Error).stack,
+    }));
   });
+  pool.on('connect', () => {
+    // eslint-disable-next-line no-console
+    console.log(JSON.stringify({
+      level: 'debug',
+      type: 'pg_pool_connect',
+      total: pool!.totalCount,
+      idle: pool!.idleCount,
+      waiting: pool!.waitingCount,
+    }));
+  });
+
   return pool;
 }
 

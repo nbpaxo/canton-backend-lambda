@@ -212,7 +212,7 @@ CREATE TABLE IF NOT EXISTS failed_withdraw_attempts (
   user_party_id   TEXT,
   amount          NUMERIC(38, 18),
   nonce           TEXT,
-  failure_step    TEXT NOT NULL CHECK (failure_step IN ('auth','lookup','replay','exchange','on_chain')),
+  failure_step    TEXT NOT NULL,
   failure_reason  TEXT NOT NULL,
   request_payload JSONB,
   resolved_at     TIMESTAMPTZ,
@@ -223,6 +223,41 @@ CREATE INDEX IF NOT EXISTS failed_withdraw_attempts_unresolved_idx
   ON failed_withdraw_attempts (created_at DESC) WHERE resolved_at IS NULL;
 CREATE INDEX IF NOT EXISTS failed_withdraw_attempts_user_idx
   ON failed_withdraw_attempts (user_party_id, created_at DESC);
+
+-- Keep the `failure_step` CHECK constraint in sync with the application's
+-- current taxonomy. Idempotent: drops any existing version of the
+-- constraint (under either historical name) before re-adding.
+--
+-- Why this matters: if app code INSERTs a `failure_step` value the DB
+-- rejects with CHECK_VIOLATION, the row is silently lost — and that's
+-- exactly the symptom that surfaced in prod on the first deploy of the
+-- 2026-05-20 refactor (new values `exchange-api-fail` / `on-chain-failed`
+-- vs old constraint that only allowed `exchange` / `on_chain`).
+DO $$
+DECLARE
+  cname TEXT;
+BEGIN
+  FOR cname IN
+    SELECT conname FROM pg_constraint
+    WHERE conrelid = 'failed_withdraw_attempts'::regclass
+      AND conname LIKE 'failed_withdraw_attempts_failure_step_check%'
+  LOOP
+    EXECUTE 'ALTER TABLE failed_withdraw_attempts DROP CONSTRAINT ' || quote_ident(cname);
+  END LOOP;
+
+  ALTER TABLE failed_withdraw_attempts
+    ADD CONSTRAINT failed_withdraw_attempts_failure_step_check
+    CHECK (failure_step IN (
+      -- Legacy values (kept for back-compat with rows written before the
+      -- 2026-05-20 refactor — strings unchanged so old data still validates).
+      'auth','lookup','replay','exchange','on_chain',
+      -- Canonical values written by current code. `exchange-api-fail` =
+      -- exchange-backend rejected before any on-chain work happened.
+      -- `on-chain-failed` = exchange already debited but the on-chain
+      -- transfer / DepositRecord burn errored.
+      'exchange-api-fail','on-chain-failed'
+    ));
+END $$;
 
 -- ─── Audit log ───────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS audit_log (
