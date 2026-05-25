@@ -54,8 +54,26 @@ aws lambda wait function-updated \
   --function-name "$FUNCTION_NAME" \
   --region "$REGION"
 
-echo "==> Updating environment variables from .env..."
-# Build JSON file for --cli-input-json
+echo "==> Updating environment variables..."
+# Source-of-truth for the env vars pushed to Lambda:
+#   1. If `.env.lambda` exists in the repo root, use it. This is the
+#      escape hatch for values that differ between local dev and the
+#      deployed function (most commonly DATABASE_URL — `.env` points at
+#      a local postgres, `.env.lambda` at RDS).
+#   2. Otherwise fall back to plain `.env`.
+#
+# Either file is read line-by-line; `# comments` and blank lines are
+# skipped and AWS reserved keys are excluded. The Lambda configuration
+# is updated via --cli-input-json so we get a clean atomic swap of the
+# Environment.Variables map.
+if [ -f "$ROOT_DIR/.env.lambda" ]; then
+  ENV_FILE="$ROOT_DIR/.env.lambda"
+  echo "    using .env.lambda (overrides .env for the deployed function)"
+else
+  ENV_FILE="$ROOT_DIR/.env"
+  echo "    using .env (no .env.lambda found)"
+fi
+
 ENV_JSON="$ROOT_DIR/.lambda-env.json"
 echo -n '{"FunctionName":"'"$FUNCTION_NAME"'","Environment":{"Variables":{' > "$ENV_JSON"
 # Reserved AWS Lambda env vars — cannot be set
@@ -68,13 +86,16 @@ while IFS='=' read -r key value; do
   echo "$RESERVED" | grep -qw "$key" && continue
   value="${value%\"}"
   value="${value#\"}"
+  # Escape backslashes + double-quotes so we emit valid JSON
+  esc_value="${value//\\/\\\\}"
+  esc_value="${esc_value//\"/\\\"}"
   if [ "$FIRST" = true ]; then
     FIRST=false
   else
     echo -n ',' >> "$ENV_JSON"
   fi
-  echo -n "\"$key\":\"$value\"" >> "$ENV_JSON"
-done < "$ROOT_DIR/.env"
+  echo -n "\"$key\":\"$esc_value\"" >> "$ENV_JSON"
+done < "$ENV_FILE"
 echo -n '}},"Handler":"index.handler","Runtime":"nodejs20.x","Timeout":30,"MemorySize":256}' >> "$ENV_JSON"
 
 aws lambda update-function-configuration \

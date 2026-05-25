@@ -9,10 +9,26 @@ if (!process.env.AWS_LAMBDA_FUNCTION_NAME) {
 
 // Canton Ledger
 export const CANTON_LEDGER_API = process.env.CANTON_LEDGER_API || 'https://canton.56.69.6.174.nip.io';
-// Splice scan API — used to enrich CIP-56 transfer choices with the
-// admin-published TransferFactory contract id, choice context, and the
-// disclosed contracts our participant needs to see to exercise it.
+// Splice scan API — used for Splice/Amulet (CC) flows only. The CIP-56
+// transfer-factory endpoint here returns the DSO/Amulet factory, which is
+// the WRONG factory for any non-Amulet instrument (USDCx etc.).
 export const SCAN_API_URL = process.env.SCAN_API_URL || 'https://scan.56.69.6.174.nip.io';
+
+// DA Utility Backend — hosts the per-instrument-admin Token Standard
+// registry that publishes the correct TransferFactory + choice contexts
+// for non-Amulet instruments (notably USDCx).
+//
+// Pattern (no auth):
+//   ${UTILITY_BACKEND_URL}/api/token-standard/v0/registrars/<admin-party-id>/...
+//
+//   devnet:  https://api.utilities.digitalasset-dev.com
+//   testnet: https://api.utilities.digitalasset-staging.com
+//   mainnet: https://api.utilities.digitalasset.com
+//
+// See exchange-v2/docs/usdcx-registry-url.md for the full URL pattern +
+// memory/exchange_v2_usdcx_testnet_working.md for the discovery story.
+export const UTILITY_BACKEND_URL = process.env.UTILITY_BACKEND_URL
+  || 'https://api.utilities.digitalasset-staging.com';
 
 // Keycloak (for JWKS verification + operator token)
 export const KEYCLOAK_BASE = process.env.KEYCLOAK_BASE || 'https://keycloak.56.69.6.174.nip.io';
@@ -24,6 +40,12 @@ export const KEYCLOAK_TOKEN_URL = `${KEYCLOAK_BASE}/realms/${KEYCLOAK_REALM}/pro
 // Operator Keycloak credentials
 export const OPERATOR_KC_USERNAME = process.env.OPERATOR_KC_USERNAME || 'mperpoperator';
 export const OPERATOR_KC_PASSWORD = process.env.OPERATOR_KC_PASSWORD || 'mperpoperator';
+
+// Keycloak master-realm admin credentials. Used by the signup flow to
+// create new users in the configured realm via the admin-cli client.
+// Defaults to admin/admin (devnet-friendly); override per environment.
+export const KC_ADMIN_USERNAME = process.env.KC_ADMIN_USERNAME || 'admin';
+export const KC_ADMIN_PASSWORD = process.env.KC_ADMIN_PASSWORD || 'admin';
 
 // Token-issuer Keycloak credentials. On devnet (Amulet/CC) the issuer is
 // the DSO and we don't mint; keep these for the custom-USDC variant if/when

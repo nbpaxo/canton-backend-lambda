@@ -1,17 +1,32 @@
 /**
- * Splice Scan client — public, unauthenticated.
+ * CIP-56 transfer-factory client — public, unauthenticated.
  *
- * Ported (trimmed) from exchange-v2/backend/src/ledger/scanApi.ts. We only
- * need `getTransferFactory` for the withdraw flow; if other choice contexts
- * are ever needed they go here.
+ * For Amulet/CC (instrument admin = DSO) the factory lives on the Splice
+ * scan; for every other instrument (USDCx etc.) it lives on DA's per-admin
+ * Token Standard registry under the Utility Backend. We always hit the
+ * per-admin registry — its URL embeds the admin party id, so it works for
+ * any instrument including Amulet (DSO is just another admin).
  *
- * The scan service is run by Super Validators and exposes the network's
- * shared state — DSO party id, AmuletRules, transfer factory choice
- * contexts and disclosures. Returning a `factoryCid`, a `choiceContext`,
- * and a list of `disclosedContracts` is the recipe for invoking a CIP-56
- * factory on our participant (which doesn't natively see the factory).
+ * The exchange-v2 memory handoff
+ * (memory/exchange_v2_usdcx_testnet_working.md) traces why the Splice
+ * scan path always returned the DSO/Amulet factory — that's what caused
+ * `DAML_FAILURE: Expected admin '<USDCx-admin>' matches actual admin
+ * 'DSO::...'` when we submitted a USDCx TransferFactory_Transfer.
  */
-import { SCAN_API_URL } from '../config.js';
+import { UTILITY_BACKEND_URL, INSTRUMENT_ADMIN_PARTY_ID } from '../config.js';
+
+/**
+ * Per-instrument-admin CIP-56 registry base URL.
+ *
+ *   ${UTILITY_BACKEND_URL}/api/token-standard/v0/registrars/<admin-party-id>
+ *
+ * The transfer-factory + accept/reject/withdraw choice-context endpoints
+ * all hang under this base. NOT under the Splice scan, which only knows
+ * Amulet/CC.
+ */
+function instrumentRegistryUrl(path: string): string {
+  return `${UTILITY_BACKEND_URL}/api/token-standard/v0/registrars/${INSTRUMENT_ADMIN_PARTY_ID}${path}`;
+}
 
 export interface EnrichedChoice {
   /** Contract id of the factory (or instruction) to exercise on. */
@@ -27,21 +42,26 @@ export interface EnrichedChoice {
 }
 
 /**
- * POST /registry/transfer-instruction/v1/transfer-factory
- * Body: { choiceArguments: <your transfer args> }
- * Returns enrichment for invoking TransferFactory_Transfer.
+ * POST {registry}/registry/transfer-instruction/v1/transfer-factory
+ * Body: { choiceArguments, excludeDebugFields: true }
+ *
+ * Returns enrichment for invoking TransferFactory_Transfer. Registry
+ * already discloses the receiver's TransferPreapproval (when present) in
+ * `choiceContext.disclosedContracts` for auto-complete; callers should
+ * dedupe disclosures by contractId before submit (Canton 3.4 rejects
+ * duplicates).
  */
 export async function getTransferFactory(
   choiceArguments: unknown,
 ): Promise<EnrichedChoice> {
-  const url = `${SCAN_API_URL}/registry/transfer-instruction/v1/transfer-factory`;
+  const url = instrumentRegistryUrl('/registry/transfer-instruction/v1/transfer-factory');
   const res = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-    body: JSON.stringify({ choiceArguments }),
+    body: JSON.stringify({ choiceArguments, excludeDebugFields: true }),
   });
   if (!res.ok) {
-    throw new Error(`scan transfer-factory: ${res.status} ${await res.text()}`);
+    throw new Error(`registry transfer-factory → ${res.status}: ${(await res.text()).slice(0, 500)}`);
   }
   const raw = (await res.json()) as Record<string, unknown>;
   return parseEnrichedChoice(raw, 'transfer-factory');
@@ -82,7 +102,7 @@ function parseEnrichedChoice(raw: unknown, label: string): EnrichedChoice {
 
   // Strip Splice debug fields — Canton tolerates extras in some versions
   // and rejects them in others; safest to send only the core four.
-  const disclosedContracts = disclosedRaw.map((d) => {
+  const stripped = disclosedRaw.map((d) => {
     const out: Record<string, unknown> = {};
     for (const k of [
       'templateId', 'template_id',
@@ -94,6 +114,19 @@ function parseEnrichedChoice(raw: unknown, label: string): EnrichedChoice {
     }
     return out;
   });
+
+  // Dedupe by contract id. Canton 3.4 rejects submissions with duplicate
+  // cids in disclosedContracts (registry response + any caller-injected
+  // preapproval can produce the same cid twice).
+  const seen = new Set<string>();
+  const disclosedContracts: Array<Record<string, unknown>> = [];
+  for (const d of stripped) {
+    const cid = (d.contractId ?? d.contract_id) as string | undefined;
+    if (!cid) { disclosedContracts.push(d); continue; }
+    if (seen.has(cid)) continue;
+    seen.add(cid);
+    disclosedContracts.push(d);
+  }
 
   return { factoryCid, choiceContext, disclosedContracts };
 }

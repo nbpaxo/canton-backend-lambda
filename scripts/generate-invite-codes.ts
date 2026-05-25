@@ -17,7 +17,7 @@ function generateCode(): string {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
   const part = () =>
     Array.from({ length: 5 }, () => chars[crypto.randomInt(chars.length)]).join('');
-  return `MPERP-${part()}-${part()}`;
+  return `MPERPS-${part()}-${part()}`;
 }
 
 async function main(): Promise<void> {

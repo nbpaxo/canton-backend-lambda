@@ -28,6 +28,8 @@ import {
   KEYCLOAK_REALM,
   KEYCLOAK_CLIENT_ID,
   KEYCLOAK_CLIENT_SECRET,
+  KC_ADMIN_USERNAME,
+  KC_ADMIN_PASSWORD,
   ADMIN_API_KEY,
 } from './config.js';
 
@@ -73,8 +75,8 @@ async function getKcAdminToken(): Promise<string> {
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({
       client_id: 'admin-cli',
-      username: 'admin',
-      password: 'admin',
+      username: KC_ADMIN_USERNAME,
+      password: KC_ADMIN_PASSWORD,
       grant_type: 'password',
     }),
   });
