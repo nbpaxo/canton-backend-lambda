@@ -41,6 +41,27 @@ export const KEYCLOAK_TOKEN_URL = `${KEYCLOAK_BASE}/realms/${KEYCLOAK_REALM}/pro
 export const OPERATOR_KC_USERNAME = process.env.OPERATOR_KC_USERNAME || 'mperpoperator';
 export const OPERATOR_KC_PASSWORD = process.env.OPERATOR_KC_PASSWORD || 'mperpoperator';
 
+// Splice validator WALLET API base URL. Hosts the self-service wallet
+// endpoints under /api/validator/v0/wallet/* — notably
+// POST /api/validator/v0/wallet/transfer-preapproval (createTransferPreapproval),
+// which makes the authenticated wallet user (JWT subject) the receiver of a
+// Splice TransferPreapproval (CC auto-accept). Unlike the admin API (port
+// 5003), this is publicly reachable behind the wallet UI host. Auth is the
+// user's own Canton/Keycloak bearer token.
+export const WALLET_API_URL = process.env.WALLET_API_URL
+  || 'https://testnet-wallet.43.217.203.156.nip.io';
+
+// Bridge operator party id (DA's xreserve bridge automation). Co-signs the
+// BridgeUserAgreementRequest. Testnet value observed on chain; differs on
+// mainnet — re-derive from an existing BridgeUserAgreement contract.
+export const BRIDGE_OPERATOR_PARTY_ID = process.env.BRIDGE_OPERATOR_PARTY_ID
+  || 'Bridge-Operator::12209d011ce250de439fefc35d16d1ab9d56fb99ccb24c18d798efb22352d533bcdb';
+
+// DA utility-operator party id. Co-signs utility-registry + bridge
+// contracts. Testnet value observed on chain; differs on mainnet.
+export const UTILITY_OPERATOR_PARTY_ID = process.env.UTILITY_OPERATOR_PARTY_ID
+  || 'DigitalAsset-UtilityOperator::12202679f2bbe57d8cba9ef3cee847ac8239df0877105ab1f01a77d47477fdce1204';
+
 // Keycloak master-realm admin credentials. Used by the signup flow to
 // create new users in the configured realm via the admin-cli client.
 // Defaults to admin/admin (devnet-friendly); override per environment.
@@ -83,6 +104,22 @@ export const PARTIES = {
 export const INSTRUMENT_ID = process.env.INSTRUMENT_ID || 'Amulet';
 export const INSTRUMENT_SYMBOL = process.env.INSTRUMENT_SYMBOL || 'CC';
 export const INSTRUMENT_DECIMALS = Number(process.env.INSTRUMENT_DECIMALS || 10);
+
+/**
+ * Format an on-chain amount (which carries full ledger precision, e.g. 10
+ * fractional digits for USDCx) to the instrument's display decimals. Use
+ * this for any human-facing amount string the backend emits so it matches
+ * what the UI shows. `decimals` defaults to INSTRUMENT_DECIMALS; pass an
+ * override for a different instrument (e.g. 10 for Amulet/CC).
+ */
+export function formatInstrumentAmount(
+  amount: string | number,
+  decimals: number = INSTRUMENT_DECIMALS,
+): string {
+  const n = typeof amount === 'number' ? amount : Number(amount);
+  if (!Number.isFinite(n)) return String(amount);
+  return n.toLocaleString('en-US', { maximumFractionDigits: decimals, useGrouping: false });
+}
 export const INSTRUMENT_ADMIN_PARTY_ID = process.env.INSTRUMENT_ADMIN_PARTY_ID
   || 'DSO::1220be58c29e65de40bf273be1dc2b266d43a9a002ea5b18955aeef7aac881bb471a';
 

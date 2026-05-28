@@ -1,0 +1,125 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="1400" viewBox="0 0 1400 1400">
+  <defs>
+    
+    <marker id="arrow-0" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#5A6A82"/>
+    </marker>
+    <marker id="arrow-1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#437EFF"/>
+    </marker>
+    <marker id="arrow-2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#F97316"/>
+    </marker>
+    <marker id="arrow-3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#10B981"/>
+    </marker>
+    <marker id="arrow-4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#8B5CF6"/>
+    </marker>
+  </defs>
+  <rect width="1400" height="1400" fill="#FFFFFF"/>
+  
+  <text x="40" y="50" font-family="Arial, Helvetica, sans-serif" font-size="22" font-weight="700" fill="#1A2233">Withdraw Flow — Trading Wallet → User Party (on-chain)</text>
+  <text x="40" y="78" font-family="Arial, Helvetica, sans-serif" font-size="13" fill="#5A6A82">Exchange locks → Lambda authorizes → exchange marks completed → Lambda submits on-chain. Cancel/unlock available before /withdraw lands.</text>
+
+  <rect x="10" y="110" width="220" height="50" fill="#E8F0FF" stroke="#437EFF" stroke-width="1.6" rx="10"/>
+  <text x="120" y="140" font-family="Arial, Helvetica, sans-serif" font-size="14" font-weight="700" text-anchor="middle" fill="#0B3A75" opacity="1">User</text>
+  <rect x="270" y="110" width="220" height="50" fill="#F0E8FF" stroke="#8B5CF6" stroke-width="1.6" rx="10"/>
+  <text x="380" y="140" font-family="Arial, Helvetica, sans-serif" font-size="14" font-weight="700" text-anchor="middle" fill="#4C1D95" opacity="1">Frontend</text>
+  <rect x="550" y="110" width="220" height="50" fill="#FFF1E8" stroke="#F97316" stroke-width="1.6" rx="10"/>
+  <text x="660" y="140" font-family="Arial, Helvetica, sans-serif" font-size="14" font-weight="700" text-anchor="middle" fill="#7C2D12" opacity="1">Exchange Backend</text>
+  <rect x="830" y="110" width="220" height="50" fill="#E8F8F2" stroke="#10B981" stroke-width="1.6" rx="10"/>
+  <text x="940" y="140" font-family="Arial, Helvetica, sans-serif" font-size="14" font-weight="700" text-anchor="middle" fill="#064E3B" opacity="1">Mperps Backend</text>
+  <rect x="1110" y="110" width="220" height="50" fill="#F3F4F6" stroke="#6B7280" stroke-width="1.6" rx="10"/>
+  <text x="1220" y="140" font-family="Arial, Helvetica, sans-serif" font-size="14" font-weight="700" text-anchor="middle" fill="#1F2937" opacity="1">Canton ledger</text>
+  <line x1="120" y1="170" x2="120" y2="1310" stroke="#CBD2DD" stroke-width="1" stroke-dasharray="3 4"/>
+  <line x1="380" y1="170" x2="380" y2="1310" stroke="#CBD2DD" stroke-width="1" stroke-dasharray="3 4"/>
+  <line x1="660" y1="170" x2="660" y2="1310" stroke="#CBD2DD" stroke-width="1" stroke-dasharray="3 4"/>
+  <line x1="940" y1="170" x2="940" y2="1310" stroke="#CBD2DD" stroke-width="1" stroke-dasharray="3 4"/>
+  <line x1="1220" y1="170" x2="1220" y2="1310" stroke="#CBD2DD" stroke-width="1" stroke-dasharray="3 4"/>
+
+  <!-- Step 1: Approval -->
+  
+  <circle cx="60" cy="230" r="11" fill="#437EFF"/>
+  <text x="60" y="234" font-family="Arial, Helvetica, sans-serif" font-size="11" font-weight="700" text-anchor="middle" fill="white">1</text>
+  
+  <text x="80" y="234" font-family="Arial, Helvetica, sans-serif" font-size="12" fill="#5A6A82" font-weight="700">Approval — lock funds</text>
+  <line x1="120" y1="265" x2="380" y2="265" stroke="#437EFF" stroke-width="1.6"  marker-end="url(#arrow-1)"/>
+  <rect x="171.39999999999998" y="248" width="157.20000000000002" height="15" fill="white"/>
+  <text x="250" y="260" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="#1A2233" text-anchor="middle">click Withdraw + confirm</text>
+  <line x1="380" y1="300" x2="660" y2="300" stroke="#437EFF" stroke-width="1.6"  marker-end="url(#arrow-1)"/>
+  <rect x="429.3" y="283" width="181.4" height="15" fill="white"/>
+  <text x="520" y="295" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="#1A2233" text-anchor="middle">POST /defi/withdraw/approval</text>
+  <line x1="660" y1="335" x2="380" y2="335" stroke="#F97316" stroke-width="1.6"  marker-end="url(#arrow-2)"/>
+  <rect x="426.275" y="318" width="187.45000000000002" height="15" fill="white"/>
+  <text x="520" y="330" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="#1A2233" text-anchor="middle">{ approvalId, nonce, expiry }</text>
+  <text x="180" y="375" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="#5A6A82" font-style="italic">approval row: status = locked  ·  futures wallet → funding wallet (locked)</text>
+
+  <!-- Step 2: Authorize -->
+  
+  <circle cx="60" cy="450" r="11" fill="#437EFF"/>
+  <text x="60" y="454" font-family="Arial, Helvetica, sans-serif" font-size="11" font-weight="700" text-anchor="middle" fill="white">2</text>
+  
+  <text x="80" y="454" font-family="Arial, Helvetica, sans-serif" font-size="12" fill="#5A6A82" font-weight="700">Authorize  (Bearer JWT  /  Loop signature)</text>
+  <line x1="380" y1="485" x2="940" y2="485" stroke="#437EFF" stroke-width="1.6"  marker-end="url(#arrow-1)"/>
+  <rect x="502.75" y="468" width="314.5" height="15" fill="white"/>
+  <text x="660" y="480" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="#1A2233" text-anchor="middle">POST /withdraw  { approvalId, partyId, amount, … }</text>
+  <text x="180" y="520" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="#5A6A82" font-style="italic">internal: Authorization: Bearer (KC Canton JWT)</text>
+  <text x="180" y="538" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="#5A6A82" font-style="italic">loop: loopAuth = { message, signature, publicKey } — Mperps verifies Ed25519 + issuedAt &lt; 60s</text>
+
+  <!-- Step 3: Mperps → Exchange m2m -->
+  
+  <circle cx="60" cy="600" r="11" fill="#437EFF"/>
+  <text x="60" y="604" font-family="Arial, Helvetica, sans-serif" font-size="11" font-weight="700" text-anchor="middle" fill="white">3</text>
+  
+  <text x="80" y="604" font-family="Arial, Helvetica, sans-serif" font-size="12" fill="#5A6A82" font-weight="700">Exchange marks COMPLETED</text>
+  <line x1="940" y1="635" x2="660" y2="635" stroke="#10B981" stroke-width="1.6"  marker-end="url(#arrow-3)"/>
+  <rect x="654.85" y="618" width="290.3" height="15" fill="white"/>
+  <text x="800" y="630" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="#1A2233" text-anchor="middle">POST /v1/withdraw/defi  (m2m, with approvalId)</text>
+  <line x1="660" y1="670" x2="940" y2="670" stroke="#F97316" stroke-width="1.6"  marker-end="url(#arrow-2)"/>
+  <rect x="654.85" y="653" width="290.3" height="15" fill="white"/>
+  <text x="800" y="665" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="#1A2233" text-anchor="middle">200 OK · status=completed · funding wallet = 0</text>
+  <text x="180" y="710" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="#5A6A82" font-style="italic">atomic row-lock on the approval row — from this point /unlock returns 409</text>
+
+  <!-- Step 4: On-chain -->
+  
+  <circle cx="60" cy="770" r="11" fill="#437EFF"/>
+  <text x="60" y="774" font-family="Arial, Helvetica, sans-serif" font-size="11" font-weight="700" text-anchor="middle" fill="white">4</text>
+  
+  <text x="80" y="774" font-family="Arial, Helvetica, sans-serif" font-size="12" fill="#5A6A82" font-weight="700">Submit on-chain transfer</text>
+  <line x1="940" y1="805" x2="1220" y2="805" stroke="#10B981" stroke-width="1.6"  marker-end="url(#arrow-3)"/>
+  <rect x="940.9" y="788" width="278.20000000000005" height="15" fill="white"/>
+  <text x="1080" y="800" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="#1A2233" text-anchor="middle">TransferFactory_Transfer  (vaultPool → user)</text>
+  <line x1="1220" y1="840" x2="940" y2="840" stroke="#10B981" stroke-width="1.6"  marker-end="url(#arrow-3)"/>
+  <rect x="1004.425" y="823" width="151.15" height="15" fill="white"/>
+  <text x="1080" y="835" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="#1A2233" text-anchor="middle">tx confirmed (updateId)</text>
+
+  <!-- Step 5: response -->
+  
+  <circle cx="60" cy="920" r="11" fill="#437EFF"/>
+  <text x="60" y="924" font-family="Arial, Helvetica, sans-serif" font-size="11" font-weight="700" text-anchor="middle" fill="white">5</text>
+  
+  <text x="80" y="924" font-family="Arial, Helvetica, sans-serif" font-size="12" fill="#5A6A82" font-weight="700">Success toast + wallet refresh</text>
+  <line x1="940" y1="955" x2="380" y2="955" stroke="#437EFF" stroke-width="1.6"  marker-end="url(#arrow-1)"/>
+  <rect x="536.025" y="938" width="247.95000000000002" height="15" fill="white"/>
+  <text x="660" y="950" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="#1A2233" text-anchor="middle">{ ok, approvalId, transferUpdateId, … }</text>
+  <line x1="380" y1="990" x2="120" y2="990" stroke="#437EFF" stroke-width="1.6"  marker-end="url(#arrow-1)"/>
+  <rect x="122.99999999999999" y="973" width="254.00000000000003" height="15" fill="white"/>
+  <text x="250" y="985" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="#1A2233" text-anchor="middle">top-right toast + futures-wallet refresh</text>
+
+  <!-- Side panel: Unlock path -->
+  <rect x="60" y="1080" width="1300" height="160" fill="#FFF1E8" stroke="#F97316" stroke-width="1.2" rx="8" opacity="0.6"/>
+  <text x="80" y="1110" font-family="Arial, Helvetica, sans-serif" font-size="13" font-weight="700" fill="#7C2D12">Cancel / unlock path</text>
+  <text x="80" y="1135" font-family="Arial, Helvetica, sans-serif" font-size="12" fill="#7C2D12">While status = locked (no /withdraw yet), user clicks &#x201C;Cancel pending withdraw&#x201D; in the Withdraw modal:</text>
+  <text x="80" y="1158" font-family="Arial, Helvetica, sans-serif" font-size="12" fill="#7C2D12">  • FE POST /v1/withdraw/defi/unlock  →  exchange row-locks the approval, flips locked → cancelled,</text>
+  <text x="80" y="1178" font-family="Arial, Helvetica, sans-serif" font-size="12" fill="#7C2D12">    moves funding wallet → futures wallet. FE refreshes both wallets, locked-balance notice clears.</text>
+  <text x="80" y="1208" font-family="Arial, Helvetica, sans-serif" font-size="12" fill="#7C2D12">  • If /withdraw raced and won the lock first (status = completed), unlock returns 409 → toast shows the exchange&#x2019;s message verbatim.</text>
+
+  
+  <rect x="40" y="1361" width="14" height="12" fill="#437EFF" stroke="#437EFF" stroke-width="1" rx="2"/>
+  <text x="62" y="1371" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="#1A2233">user action / FE → Mperps or Exchange</text>
+  <rect x="40" y="1381" width="14" height="12" fill="#F97316" stroke="#F97316" stroke-width="1" rx="2"/>
+  <text x="62" y="1391" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="#1A2233">exchange response</text>
+  <rect x="40" y="1401" width="14" height="12" fill="#10B981" stroke="#10B981" stroke-width="1" rx="2"/>
+  <text x="62" y="1411" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="#1A2233">Mperps m2m / on-chain</text>
+</svg>

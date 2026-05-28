@@ -1,0 +1,128 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="1400" viewBox="0 0 1400 1400">
+  <defs>
+    
+    <marker id="arrow-0" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#5A6A82"/>
+    </marker>
+    <marker id="arrow-1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#437EFF"/>
+    </marker>
+    <marker id="arrow-2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#F97316"/>
+    </marker>
+    <marker id="arrow-3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#10B981"/>
+    </marker>
+    <marker id="arrow-4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#8B5CF6"/>
+    </marker>
+  </defs>
+  <rect width="1400" height="1400" fill="#FFFFFF"/>
+  
+  <text x="40" y="50" font-family="Arial, Helvetica, sans-serif" font-size="22" font-weight="700" fill="#1A2233">Deposit Flow — USDCx into Trading Wallet</text>
+  <text x="40" y="78" font-family="Arial, Helvetica, sans-serif" font-size="13" fill="#5A6A82">Bridge USDC → USDCx; route to vault pool; watcher gates on KYC; exchange creates wallets + credits on first deposit.</text>
+
+  <rect x="20" y="110" width="200" height="50" fill="#E8F0FF" stroke="#437EFF" stroke-width="1.6" rx="10"/>
+  <text x="120" y="140" font-family="Arial, Helvetica, sans-serif" font-size="14" font-weight="700" text-anchor="middle" fill="#0B3A75" opacity="1">User</text>
+  <rect x="280" y="110" width="200" height="50" fill="#F0E8FF" stroke="#8B5CF6" stroke-width="1.6" rx="10"/>
+  <text x="380" y="140" font-family="Arial, Helvetica, sans-serif" font-size="14" font-weight="700" text-anchor="middle" fill="#4C1D95" opacity="1">Frontend</text>
+  <rect x="540" y="110" width="200" height="50" fill="#E8F8F2" stroke="#10B981" stroke-width="1.6" rx="10"/>
+  <text x="640" y="140" font-family="Arial, Helvetica, sans-serif" font-size="14" font-weight="700" text-anchor="middle" fill="#064E3B" opacity="1">Mperps Backend</text>
+  <rect x="800" y="110" width="200" height="50" fill="#E8F8F2" stroke="#10B981" stroke-width="1.6" rx="10"/>
+  <text x="900" y="140" font-family="Arial, Helvetica, sans-serif" font-size="14" font-weight="700" text-anchor="middle" fill="#064E3B" opacity="1">Watcher (PM2)</text>
+  <rect x="1060" y="110" width="200" height="50" fill="#FFF1E8" stroke="#F97316" stroke-width="1.6" rx="10"/>
+  <text x="1160" y="140" font-family="Arial, Helvetica, sans-serif" font-size="14" font-weight="700" text-anchor="middle" fill="#7C2D12" opacity="1">Exchange Backend</text>
+  <line x1="120" y1="170" x2="120" y2="1310" stroke="#CBD2DD" stroke-width="1" stroke-dasharray="3 4"/>
+  <line x1="380" y1="170" x2="380" y2="1310" stroke="#CBD2DD" stroke-width="1" stroke-dasharray="3 4"/>
+  <line x1="640" y1="170" x2="640" y2="1310" stroke="#CBD2DD" stroke-width="1" stroke-dasharray="3 4"/>
+  <line x1="900" y1="170" x2="900" y2="1310" stroke="#CBD2DD" stroke-width="1" stroke-dasharray="3 4"/>
+  <line x1="1160" y1="170" x2="1160" y2="1310" stroke="#CBD2DD" stroke-width="1" stroke-dasharray="3 4"/>
+
+  <!-- Step 1: KYC gate -->
+  
+  <circle cx="60" cy="230" r="11" fill="#437EFF"/>
+  <text x="60" y="234" font-family="Arial, Helvetica, sans-serif" font-size="11" font-weight="700" text-anchor="middle" fill="white">1</text>
+  
+  <text x="80" y="234" font-family="Arial, Helvetica, sans-serif" font-size="12" fill="#5A6A82" font-weight="700">KYC gate</text>
+  <line x1="120" y1="240" x2="380" y2="240" stroke="#437EFF" stroke-width="1.6"  marker-end="url(#arrow-1)"/>
+  <rect x="189.55" y="223" width="120.9" height="15" fill="white"/>
+  <text x="250" y="235" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="#1A2233" text-anchor="middle">open Deposit modal</text>
+  <line x1="380" y1="270" x2="640" y2="270" stroke="#10B981" stroke-width="1.6"  marker-end="url(#arrow-3)"/>
+  <rect x="401.15" y="253" width="217.70000000000002" height="15" fill="white"/>
+  <text x="510" y="265" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="#1A2233" text-anchor="middle">GET /me  (KYC + instrument config)</text>
+  <text x="60" y="310" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="#5A6A82" font-style="italic">if KYC not approved → block deposit + nudge to Persona</text>
+
+  <!-- Step 2: Bridge USDC → USDCx -->
+  
+  <circle cx="60" cy="380" r="11" fill="#437EFF"/>
+  <text x="60" y="384" font-family="Arial, Helvetica, sans-serif" font-size="11" font-weight="700" text-anchor="middle" fill="white">2</text>
+  
+  <text x="80" y="384" font-family="Arial, Helvetica, sans-serif" font-size="12" fill="#5A6A82" font-weight="700">Bridge USDC → USDCx (external)</text>
+  <line x1="120" y1="410" x2="1160" y2="410" stroke="#F97316" stroke-width="1.6"  marker-end="url(#arrow-2)"/>
+  <rect x="522.075" y="393" width="235.85000000000002" height="15" fill="white"/>
+  <text x="640" y="405" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="#1A2233" text-anchor="middle">redirect to xreserve / Loop bridge UI</text>
+  <text x="180" y="445" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="#5A6A82" font-style="italic">internal user: xreserve portal /bridge/deposits  ·  loop user: github.io/xreserve-deposits inside Loop wallet</text>
+  <text x="180" y="465" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="#5A6A82" font-style="italic">result: USDCx Holdings appear on user&#x2019;s Canton party</text>
+
+  <!-- Step 3: USDCx → vault pool -->
+  
+  <circle cx="60" cy="520" r="11" fill="#437EFF"/>
+  <text x="60" y="524" font-family="Arial, Helvetica, sans-serif" font-size="11" font-weight="700" text-anchor="middle" fill="white">3</text>
+  
+  <text x="80" y="524" font-family="Arial, Helvetica, sans-serif" font-size="12" fill="#5A6A82" font-weight="700">Transfer USDCx to vault pool</text>
+  <line x1="120" y1="555" x2="380" y2="555" stroke="#437EFF" stroke-width="1.6"  marker-end="url(#arrow-1)"/>
+  <rect x="204.675" y="538" width="90.65" height="15" fill="white"/>
+  <text x="250" y="550" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="#1A2233" text-anchor="middle">click Deposit</text>
+  <line x1="380" y1="590" x2="640" y2="590" stroke="#10B981" stroke-width="1.6"  marker-end="url(#arrow-3)"/>
+  <rect x="373.92499999999995" y="573" width="272.15000000000003" height="15" fill="white"/>
+  <text x="510" y="585" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="#1A2233" text-anchor="middle">POST /internal-deposit  (Bearer Canton JWT)</text>
+  <text x="180" y="625" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="#5A6A82" font-style="italic">loop user path: FE → Loop SDK walletTransfer(vaultPool, amount, USDCx) — Loop popup signs directly</text>
+  <line x1="640" y1="660" x2="1200" y2="660" stroke="#10B981" stroke-width="1.6"  marker-end="url(#arrow-3)"/>
+  <rect x="777.875" y="643" width="284.25" height="15" fill="white"/>
+  <text x="920" y="655" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="#1A2233" text-anchor="middle">TransferFactory_Transfer to vaultPool (USDCx)</text>
+  <text x="640" y="700" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="#5A6A82" font-style="italic">vaultPool has TransferPreapproval → auto-completes on chain</text>
+
+  <!-- Step 4: Watcher attribution -->
+  
+  <circle cx="60" cy="780" r="11" fill="#437EFF"/>
+  <text x="60" y="784" font-family="Arial, Helvetica, sans-serif" font-size="11" font-weight="700" text-anchor="middle" fill="white">4</text>
+  
+  <text x="80" y="784" font-family="Arial, Helvetica, sans-serif" font-size="12" fill="#5A6A82" font-weight="700">Watcher detects deposit (gated on KYC)</text>
+  <line x1="900" y1="815" x2="640" y2="815" stroke="#10B981" stroke-width="1.6"  marker-end="url(#arrow-3)"/>
+  <rect x="621.825" y="796" width="296.35" height="15" fill="white"/>
+  <text x="770" y="808" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="#1A2233" text-anchor="middle">ACS poll → finds new USDCx Holding on vaultPool</text>
+  <line x1="640" y1="850" x2="900" y2="850" stroke="#10B981" stroke-width="1.6"  marker-end="url(#arrow-3)"/>
+  <rect x="612.75" y="833" width="314.5" height="15" fill="white"/>
+  <text x="770" y="845" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="#1A2233" text-anchor="middle">resolve sender from tx tree → create DepositRecord</text>
+  <line x1="900" y1="885" x2="1160" y2="885" stroke="#F97316" stroke-width="1.6"  marker-end="url(#arrow-2)"/>
+  <rect x="939.3" y="868" width="181.4" height="15" fill="white"/>
+  <text x="1030" y="880" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="#1A2233" text-anchor="middle">POST /v1/deposit/defi  (m2m)</text>
+  <text x="640" y="920" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="#5A6A82" font-style="italic">watcher confirms KYC on the user before notifying — if missing, the deposit is recorded but NOT credited</text>
+
+  <!-- Step 5: Exchange credit -->
+  
+  <circle cx="60" cy="980" r="11" fill="#437EFF"/>
+  <text x="60" y="984" font-family="Arial, Helvetica, sans-serif" font-size="11" font-weight="700" text-anchor="middle" fill="white">5</text>
+  
+  <text x="80" y="984" font-family="Arial, Helvetica, sans-serif" font-size="12" fill="#5A6A82" font-weight="700">Exchange Backend credits trading wallet</text>
+  <text x="1060" y="1020" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="#7C2D12" font-weight="700">first deposit: create futures + funding wallets</text>
+  <text x="1060" y="1040" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="#7C2D12">then allocate amount → futures wallet</text>
+
+  <!-- Step 6: Trade -->
+  
+  <circle cx="60" cy="1130" r="11" fill="#437EFF"/>
+  <text x="60" y="1134" font-family="Arial, Helvetica, sans-serif" font-size="11" font-weight="700" text-anchor="middle" fill="white">6</text>
+  
+  <text x="80" y="1134" font-family="Arial, Helvetica, sans-serif" font-size="12" fill="#5A6A82" font-weight="700">User can trade</text>
+  <line x1="1160" y1="1160" x2="120" y2="1160" stroke="#437EFF" stroke-width="1.6"  marker-end="url(#arrow-1)"/>
+  <rect x="531.15" y="1143" width="217.70000000000002" height="15" fill="white"/>
+  <text x="640" y="1155" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="#1A2233" text-anchor="middle">balance shows up in trade terminal</text>
+
+  
+  <rect x="40" y="1361" width="14" height="12" fill="#437EFF" stroke="#437EFF" stroke-width="1" rx="2"/>
+  <text x="62" y="1371" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="#1A2233">user action</text>
+  <rect x="40" y="1381" width="14" height="12" fill="#10B981" stroke="#10B981" stroke-width="1" rx="2"/>
+  <text x="62" y="1391" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="#1A2233">in-app on-chain / m2m</text>
+  <rect x="40" y="1401" width="14" height="12" fill="#F97316" stroke="#F97316" stroke-width="1" rx="2"/>
+  <text x="62" y="1411" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="#1A2233">exchange / external</text>
+</svg>

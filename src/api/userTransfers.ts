@@ -24,7 +24,7 @@
  */
 
 import { Router, Request, Response, json } from 'express';
-import { normalizePartyId } from '../auth.js';
+import { normalizePartyId, getAdminToken } from '../auth.js';
 import { sdkConfig } from '../sdk.js';
 import {
   getActiveContracts,
@@ -35,8 +35,17 @@ import {
   IFACE_TRANSFER_INSTRUCTION,
   CHOICE_TRANSFER_FACTORY_TRANSFER,
 } from '../canton-sdk/config.js';
-import { getTransferFactory } from '../canton-sdk/scanApi.js';
-import { CANTON_LEDGER_API, INSTRUMENT_ADMIN_PARTY_ID, INSTRUMENT_ID, UTILITY_BACKEND_URL } from '../config.js';
+import { getTransferFactory, SCAN_TRANSFER_FACTORY_URL } from '../canton-sdk/scanApi.js';
+import {
+  CANTON_LEDGER_API,
+  INSTRUMENT_ADMIN_PARTY_ID,
+  INSTRUMENT_ID,
+  UTILITY_BACKEND_URL,
+  WALLET_API_URL,
+  BRIDGE_OPERATOR_PARTY_ID,
+  UTILITY_OPERATOR_PARTY_ID,
+  formatInstrumentAmount,
+} from '../config.js';
 
 const router = Router();
 
@@ -63,6 +72,30 @@ const TPL_TRANSFER_OFFER =
 // USDCx by exercising BridgeUserAgreement_Mint to consume it.
 const TPL_DEPOSIT_ATTESTATION =
   `${PKG_UTILITY_BRIDGE}:Utility.Bridge.V0.Attestation.Deposit:DepositAttestation`;
+// Request contract a user creates to enrol in the USDCx bridge. The bridge
+// operator's automation accepts it, producing a BridgeUserAgreement (which
+// then carries the Mint/Burn choices). Same package as the agreement.
+const TPL_BRIDGE_USER_AGREEMENT_REQUEST =
+  `${PKG_UTILITY_BRIDGE}:Utility.Bridge.V0.Agreement.User:BridgeUserAgreementRequest`;
+
+// BridgeUserAgreement mint choice — consumes a DepositAttestation, produces USDCx.
+const CHOICE_BUA_MINT = 'BridgeUserAgreement_Mint';
+const CHOICE_BUA_BURN = 'BridgeUserAgreement_Burn';
+// Ethereum domain id for the bridge-out (burn). Currently the only supported
+// destination. Canton JSON API encodes Daml Int as a string.
+const ETHEREUM_DOMAIN_ID = '0';
+// USDCx on-chain precision (scale for exact change arithmetic on burn).
+const USDCX_SCALE = 10;
+
+// BurnMint `contextContractIds` record keys (per DA utility-bridge docs:
+// "Extracting Contract IDs and Disclosed Contracts"). The record always has
+// these three fields; appReward/featured are Optional and may be absent from
+// the factory response (testnet USDCx returns only instrument-configuration),
+// in which case we pass null (Daml None). The response's `issuer-credentials`
+// entry is NOT part of contextContractIds and is ignored.
+const CTX_KEY_INSTRUMENT_CONFIG = 'utility.digitalasset.com/instrument-configuration';
+const CTX_KEY_APP_REWARD_CONFIG = 'utility.digitalasset.com/app-reward-configuration';
+const CTX_KEY_FEATURED_APP_RIGHT = 'utility.digitalasset.com/featured-app-right';
 
 // Splice's native Amulet preapproval. Matches by template-name suffix
 // (the Amulet/Splice package id rolls forward each release; pinning would
@@ -126,10 +159,73 @@ async function queryAcsUnfiltered(
     .filter((c): c is { templateId: string; contractId: string; payload: Record<string, unknown> } => c !== null);
 }
 
-// Hardcoded testnet utility-operator party (observed on chain). Mainnet
-// will differ — re-derive at that point.
-const UTILITY_OPERATOR =
-  'DigitalAsset-UtilityOperator::12202679f2bbe57d8cba9ef3cee847ac8239df0877105ab1f01a77d47477fdce1204';
+// DA utility-operator party (env-configurable; testnet default in config).
+const UTILITY_OPERATOR = UTILITY_OPERATOR_PARTY_ID;
+
+interface BurnMintContext {
+  factoryId: string;
+  /** `contextContractIds` record for the Mint/Burn choice (field-name → cid). */
+  contextContractIds: Record<string, unknown>;
+  disclosedContracts: Array<Record<string, unknown>>;
+}
+
+/**
+ * Fetch the burn-mint-factory choice context from the DA utility backend and
+ * shape it into the `contextContractIds` record the BurnMint choice expects.
+ * Field names are derived from the returned context keys (see contextKeyToField)
+ * so we adapt to whatever the registry currently returns.
+ */
+async function fetchBurnMintContext(
+  inputHoldingCids: string[],
+  outputs: Array<{ owner: string; amount: string }>,
+): Promise<BurnMintContext> {
+  const url = `${UTILITY_BACKEND_URL}/api/utilities/v0/registry/burn-mint-instruction/v0/burn-mint-factory`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      instrumentId: { admin: INSTRUMENT_ADMIN_PARTY_ID, id: INSTRUMENT_ID },
+      inputHoldingCids,
+      outputs,
+    }),
+  });
+  if (!res.ok) {
+    throw new Error(`burn-mint-factory ${res.status}: ${(await res.text()).slice(0, 400)}`);
+  }
+  const j = (await res.json()) as {
+    factoryId?: string;
+    choiceContext?: {
+      choiceContextData?: { values?: Record<string, { tag?: string; value: unknown }> };
+      disclosedContracts?: Array<Record<string, unknown>>;
+    };
+  };
+  if (!j.factoryId) {
+    throw new Error('burn-mint-factory response missing factoryId');
+  }
+  const values = (j.choiceContext?.choiceContextData?.values ?? {}) as Record<string, { value?: unknown }>;
+  const cid = (key: string): unknown => values[key]?.value ?? null;
+  const instrumentConfigurationCid = cid(CTX_KEY_INSTRUMENT_CONFIG);
+  if (instrumentConfigurationCid == null) {
+    throw new Error(
+      `burn-mint-factory response missing instrument-configuration (have keys: ${Object.keys(values).join(', ')})`,
+    );
+  }
+  const contextContractIds: Record<string, unknown> = {
+    instrumentConfigurationCid,
+    appRewardConfigurationCid: cid(CTX_KEY_APP_REWARD_CONFIG),
+    featuredAppRightCid: cid(CTX_KEY_FEATURED_APP_RIGHT),
+  };
+  // Dedupe disclosed contracts by contract id (Canton 3.4 rejects dups).
+  const seen = new Set<string>();
+  const disclosedContracts = (j.choiceContext?.disclosedContracts ?? []).filter((d) => {
+    const c = (d as { contractId?: string }).contractId;
+    if (!c) return true;
+    if (seen.has(c)) return false;
+    seen.add(c);
+    return true;
+  });
+  return { factoryId: j.factoryId, contextContractIds, disclosedContracts };
+}
 
 // ─── User-auth middleware ────────────────────────────────────────────────
 
@@ -294,11 +390,7 @@ router.post('/user/transfer-preapproval/create', json(), requireUserAuth, async 
   const instrument = (body.instrument ?? 'USDCx').toUpperCase();
 
   if (instrument === 'CC' || instrument === 'AMULET') {
-    res.status(501).json({
-      error: 'cc_preapproval_not_supported_inproc',
-      detail: 'Create the CC auto-accept on the validator wallet for now.',
-      redirectTo: 'https://testnet-wallet.43.217.203.156.nip.io/',
-    });
+    await enableCcPreapproval(userParty, userToken, userId, res);
     return;
   }
   if (instrument !== 'USDCX') {
@@ -343,6 +435,127 @@ router.post('/user/transfer-preapproval/create', json(), requireUserAuth, async 
   }
 });
 
+/**
+ * Enable the Splice-native (CC / Amulet) TransferPreapproval for a user via
+ * the validator's self-service WALLET API:
+ *
+ *   POST {WALLET_API_URL}/api/validator/v0/wallet/transfer-preapproval
+ *   (operationId createTransferPreapproval)
+ *
+ * The authenticated wallet user (the bearer token's subject) becomes the
+ * receiver who auto-accepts incoming CC. We forward the user's own bearer
+ * token.
+ *
+ * Our signup users get a Canton party via the JSON Ledger API but no Splice
+ * *wallet* install, so the wallet API first answers 404 "No wallet found".
+ * In that case we onboard the user to their EXISTING party via the validator
+ * admin API (`onboardUser`, operator m2m token — `party_id` set +
+ * createPartyIfMissing=false ⇒ assigns the existing party, never reallocates)
+ * and retry once.
+ *
+ * Idempotent: a pre-check short-circuits if a preapproval already exists, and
+ * a 409 from the wallet API is treated as "already enabled".
+ */
+async function enableCcPreapproval(
+  userParty: string,
+  userToken: string,
+  userId: string,
+  res: Response,
+): Promise<void> {
+  const createPreapproval = () =>
+    fetch(`${WALLET_API_URL}/api/validator/v0/wallet/transfer-preapproval`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${userToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({}),
+    });
+
+  try {
+    // Short-circuit if a Splice TransferPreapproval already exists for the
+    // user (matched by template-name suffix — the Amulet pkg id rolls fwd).
+    try {
+      const all = await queryAcsUnfiltered(userToken, userParty);
+      const alreadyEnabled = all.some(
+        (c) =>
+          c.templateId.endsWith(TPL_SPLICE_AMULET_TRANSFER_PREAPPROVAL_SUFFIX) &&
+          (c.payload as Record<string, unknown>).receiver === userParty,
+      );
+      if (alreadyEnabled) {
+        res.json({
+          ok: true,
+          instrument: 'CC',
+          message: 'CC auto-accept is already enabled.',
+          alreadyEnabled: true,
+        });
+        return;
+      }
+    } catch (e) {
+      // Non-fatal — fall through to the wallet API, which is itself idempotent.
+      console.warn('[cc-preapproval] pre-check ACS read failed:', (e as Error).message);
+    }
+
+    let walletRes = await createPreapproval();
+
+    // No Splice wallet for this user yet → onboard them to their existing
+    // party (admin/m2m), then retry the preapproval once.
+    if (walletRes.status === 404) {
+      const adminToken = await getAdminToken();
+      const onboardRes = await fetch(`${WALLET_API_URL}/api/validator/v0/admin/users`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${adminToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ name: userId, party_id: userParty, createPartyIfMissing: false }),
+      });
+      if (!onboardRes.ok && onboardRes.status !== 409) {
+        const otext = await onboardRes.text();
+        res.status(502).json({
+          error: 'wallet_onboard_failed',
+          detail: `validator onboardUser → ${onboardRes.status}: ${otext.slice(0, 400)}`,
+        });
+        return;
+      }
+      walletRes = await createPreapproval();
+    }
+
+    if (walletRes.status === 409) {
+      res.json({
+        ok: true,
+        instrument: 'CC',
+        message: 'CC auto-accept is already enabled.',
+        alreadyEnabled: true,
+      });
+      return;
+    }
+    if (!walletRes.ok) {
+      const text = await walletRes.text();
+      res.status(walletRes.status === 401 || walletRes.status === 403 ? walletRes.status : 502).json({
+        error: 'cc_preapproval_failed',
+        detail: `wallet transfer-preapproval → ${walletRes.status}: ${text.slice(0, 400)}`,
+      });
+      return;
+    }
+
+    const body = (await walletRes.json().catch(() => ({}))) as {
+      transfer_preapproval_contract_id?: string;
+    };
+    res.json({
+      ok: true,
+      instrument: 'CC',
+      message: 'CC auto-accept enabled — incoming CC will land directly without an Accept step.',
+      contractId: body.transfer_preapproval_contract_id ?? null,
+    });
+  } catch (err) {
+    res.status(502).json({
+      error: 'cc_preapproval_failed',
+      detail: (err as Error).message,
+    });
+  }
+}
+
 // ─── GET /user/bua/status ────────────────────────────────────────────────
 // Returns the BridgeUserAgreement state for the caller. If absent, the
 // FE prompts the user to log into the xreserve portal to create one.
@@ -379,8 +592,51 @@ router.get('/user/bua/status', requireUserAuth, async (req: Request, res: Respon
   }
 });
 
+// CIP-56 Holding interface — all token balances (USDCx + Amulet/CC) expose it.
+const IFACE_HOLDING = '#splice-api-token-holding-v1:Splice.Api.Token.HoldingV1:Holding';
+
+interface ResolvedInstrument {
+  /** Issuer/admin party. For CC this is the DSO, derived from holdings. */
+  admin: string;
+  /** Daml instrument id: 'USDCx' or 'Amulet'. */
+  id: string;
+  /** Caller's owned, matching Holdings (interface views). */
+  holdings: Array<{ contractId: string; interfaceView?: Record<string, unknown> }>;
+  /** Transfer-factory registry URL. undefined → USDCx per-admin default. */
+  registryUrl?: string;
+  symbol: 'USDCx' | 'CC';
+}
+
+/**
+ * Resolve the on-chain instrument context for a peer-to-peer transfer.
+ *   • USDCx → configured admin/id; factory via DA per-admin registry (default).
+ *   • CC    → Amulet; DSO admin derived from the caller's Amulet holdings;
+ *             factory via the Splice scan (Amulet's registrar).
+ */
+async function resolveInstrumentForSend(
+  instrument: string,
+  userToken: string,
+  userParty: string,
+): Promise<ResolvedInstrument> {
+  const holdings = await getActiveContracts(sdkConfig, userToken, userParty, { interfaceId: IFACE_HOLDING });
+  const owned = (match: (iid: { admin?: string; id?: string }) => boolean) =>
+    holdings.filter((h) => {
+      const v = h.interfaceView as Record<string, any> | undefined;
+      if (!v || v.owner !== userParty) return false;
+      return match((v.instrumentId ?? {}) as { admin?: string; id?: string });
+    });
+
+  if (instrument === 'CC' || instrument === 'AMULET') {
+    const cc = owned((iid) => iid.id === 'Amulet');
+    const admin = (cc[0]?.interfaceView as Record<string, any> | undefined)?.instrumentId?.admin as string | undefined;
+    return { admin: admin ?? '', id: 'Amulet', holdings: cc, registryUrl: SCAN_TRANSFER_FACTORY_URL, symbol: 'CC' };
+  }
+  const usdcx = owned((iid) => iid.admin === INSTRUMENT_ADMIN_PARTY_ID && iid.id === INSTRUMENT_ID);
+  return { admin: INSTRUMENT_ADMIN_PARTY_ID, id: INSTRUMENT_ID, holdings: usdcx, symbol: 'USDCx' };
+}
+
 // ─── POST /user/transfers/send ───────────────────────────────────────────
-// USDCx peer-to-peer send. body: { receiver, amount, memo? }
+// Peer-to-peer send of USDCx or CC. body: { receiver, amount, instrument?, memo? }
 //
 // 1. Pull the sender's USDCx holdings (ACS, interface filter).
 // 2. Pick smallest-first to cover `amount` (delegated to the picker logic
@@ -392,34 +648,27 @@ router.get('/user/bua/status', requireUserAuth, async (req: Request, res: Respon
 // 4. Submit TransferFactory_Transfer.
 router.post('/user/transfers/send', json(), requireUserAuth, async (req: Request, res: Response) => {
   const { userParty, userToken, userId } = req as UserAuthRequest;
-  const body = (req.body ?? {}) as { receiver?: string; amount?: string; memo?: Record<string, string> };
+  const body = (req.body ?? {}) as { receiver?: string; amount?: string; instrument?: string; memo?: Record<string, string> };
   if (!body.receiver || !body.amount) {
     res.status(400).json({ error: 'required fields: receiver, amount' });
     return;
   }
   const receiver = normalizePartyId(body.receiver);
   const amount = body.amount;
+  const instrument = (body.instrument ?? 'USDCx').toUpperCase();
 
   try {
-    // USDCx holdings via the CIP-56 Holding interface.
-    const IFACE_HOLDING =
-      '#splice-api-token-holding-v1:Splice.Api.Token.HoldingV1:Holding';
-    const holdings = await getActiveContracts(
-      sdkConfig,
-      userToken,
-      userParty,
-      { interfaceId: IFACE_HOLDING },
-    );
-    const usdcxOwned = holdings.filter((h) => {
-      const v = h.interfaceView as Record<string, any> | undefined;
-      if (!v) return false;
-      if (v.owner !== userParty) return false;
-      const iid = v.instrumentId as { admin?: string; id?: string } | undefined;
-      return iid?.admin === INSTRUMENT_ADMIN_PARTY_ID && iid?.id === INSTRUMENT_ID;
-    });
+    const inst = await resolveInstrumentForSend(instrument, userToken, userParty);
 
-    if (usdcxOwned.length === 0) {
-      res.status(400).json({ error: 'no_usdcx_holdings', detail: 'You have no USDCx holdings on your party.' });
+    if (inst.symbol === 'CC' && !inst.admin) {
+      res.status(400).json({ error: 'no_cc_holdings', detail: 'You have no CC (Canton Coin) holdings on your party.' });
+      return;
+    }
+    if (inst.holdings.length === 0) {
+      res.status(400).json({
+        error: `no_${inst.symbol.toLowerCase()}_holdings`,
+        detail: `You have no ${inst.symbol} holdings on your party.`,
+      });
       return;
     }
 
@@ -432,15 +681,15 @@ router.post('/user/transfers/send', json(), requireUserAuth, async (req: Request
     // receiver enough time even if they're slow to log in.
     const INSTRUCTION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
     const transferArgs = {
-      expectedAdmin: INSTRUMENT_ADMIN_PARTY_ID,
+      expectedAdmin: inst.admin,
       transfer: {
         sender: userParty,
         receiver,
         amount,
-        instrumentId: { admin: INSTRUMENT_ADMIN_PARTY_ID, id: INSTRUMENT_ID },
+        instrumentId: { admin: inst.admin, id: inst.id },
         requestedAt: now.toISOString(),
         executeBefore: new Date(now.getTime() + INSTRUCTION_TTL_MS).toISOString(),
-        inputHoldingCids: usdcxOwned.map((h) => h.contractId),
+        inputHoldingCids: inst.holdings.map((h) => h.contractId),
         meta: { values: { ...(body.memo ?? {}) } },
       },
       extraArgs: {
@@ -449,7 +698,7 @@ router.post('/user/transfers/send', json(), requireUserAuth, async (req: Request
       },
     };
 
-    const enriched = await getTransferFactory(transferArgs);
+    const enriched = await getTransferFactory(transferArgs, inst.registryUrl);
     transferArgs.extraArgs.context = enriched.choiceContext;
 
     // DA's per-admin registry returns ONE of two factory cids based on the
@@ -459,10 +708,12 @@ router.post('/user/transfers/send', json(), requireUserAuth, async (req: Request
     //   • AllocationFactory cid    → TransferFactory_Transfer creates a
     //     2-step TransferInstruction; the receiver must POST /accept.
     // Detect which path the registry chose by looking at disclosedContracts.
+    // USDCx preapproval = UtilityRegistry template; CC = Splice Amulet template.
     const autoCompleted = enriched.disclosedContracts.some((d) => {
       const tplId = (d.templateId ?? (d as Record<string, unknown>).template_id) as string | undefined;
-      return tplId?.endsWith(
-        ':Utility.Registry.App.V0.Model.TransferPreapproval:TransferPreapproval',
+      return !!tplId && (
+        tplId.endsWith(':Utility.Registry.App.V0.Model.TransferPreapproval:TransferPreapproval') ||
+        tplId.endsWith(':Splice.AmuletRules:TransferPreapproval')
       );
     });
 
@@ -489,7 +740,7 @@ router.post('/user/transfers/send', json(), requireUserAuth, async (req: Request
       sender: userParty,
       receiver,
       amount,
-      instrument: INSTRUMENT_ID,
+      instrument: inst.symbol,
       /** `completed` = auto-credited via preapproval, `pending_acceptance` =
        *  2-step TransferInstruction awaiting receiver accept. */
       status: autoCompleted ? 'completed' : 'pending_acceptance',
@@ -522,8 +773,9 @@ router.post('/user/transfers/send', json(), requireUserAuth, async (req: Request
 // state rather than blocking the user.
 router.get('/user/transfers/preapproval-check', requireUserAuth, async (req: Request, res: Response) => {
   const { userParty, userToken } = req as UserAuthRequest;
-  const q = (req.query ?? {}) as { receiver?: string };
+  const q = (req.query ?? {}) as { receiver?: string; instrument?: string };
   const receiver = q.receiver?.trim();
+  const instrument = (q.instrument ?? 'USDCx').toUpperCase();
   if (!receiver || !receiver.includes('::')) {
     res.status(400).json({
       error: 'receiver must be a full party id (prefix::namespace)',
@@ -532,43 +784,32 @@ router.get('/user/transfers/preapproval-check', requireUserAuth, async (req: Req
   }
 
   try {
-    // 1. Find ONE USDCx holding the sender owns — the registry needs at
-    //    least one cid in inputHoldingCids or it 400s.
-    const IFACE_HOLDING =
-      '#splice-api-token-holding-v1:Splice.Api.Token.HoldingV1:Holding';
-    const holdings = await getActiveContracts(
-      sdkConfig,
-      userToken,
-      userParty,
-      { interfaceId: IFACE_HOLDING },
-    );
-    const probeCid = holdings.find((h) => {
-      const v = h.interfaceView as Record<string, any> | undefined;
-      if (!v || v.owner !== userParty) return false;
-      const iid = v.instrumentId as { admin?: string; id?: string } | undefined;
-      return iid?.admin === INSTRUMENT_ADMIN_PARTY_ID && iid?.id === INSTRUMENT_ID;
-    })?.contractId;
+    // Find ONE holding of the instrument the sender owns — the registry needs
+    // at least one cid in inputHoldingCids or it 400s. Also yields the admin
+    // (DSO for CC).
+    const inst = await resolveInstrumentForSend(instrument, userToken, userParty);
+    const probeCid = inst.holdings[0]?.contractId;
 
-    if (!probeCid) {
+    if (!probeCid || (inst.symbol === 'CC' && !inst.admin)) {
       res.json({
         receiver,
-        instrumentAdmin: INSTRUMENT_ADMIN_PARTY_ID,
-        instrumentId: INSTRUMENT_ID,
+        instrumentAdmin: inst.admin || null,
+        instrumentId: inst.id,
         hasPreapproval: null,
-        reason: 'sender_has_no_usdcx_holdings',
+        reason: `sender_has_no_${inst.symbol.toLowerCase()}_holdings`,
       });
       return;
     }
 
-    // 2. Probe the registry with one real holding cid. Never submitted.
+    // Probe the registry with one real holding cid. Never submitted.
     const now = new Date();
     const probeArgs = {
-      expectedAdmin: INSTRUMENT_ADMIN_PARTY_ID,
+      expectedAdmin: inst.admin,
       transfer: {
         sender: userParty,
         receiver,
         amount: '1',
-        instrumentId: { admin: INSTRUMENT_ADMIN_PARTY_ID, id: INSTRUMENT_ID },
+        instrumentId: { admin: inst.admin, id: inst.id },
         requestedAt: now.toISOString(),
         executeBefore: new Date(now.getTime() + 60_000).toISOString(),
         inputHoldingCids: [probeCid],
@@ -576,17 +817,18 @@ router.get('/user/transfers/preapproval-check', requireUserAuth, async (req: Req
       },
       extraArgs: { context: { values: {} }, meta: { values: {} } },
     };
-    const enriched = await getTransferFactory(probeArgs);
+    const enriched = await getTransferFactory(probeArgs, inst.registryUrl);
     const hasPreapproval = enriched.disclosedContracts.some((d) => {
       const tplId = (d.templateId ?? (d as Record<string, unknown>).template_id) as string | undefined;
-      return tplId?.endsWith(
-        ':Utility.Registry.App.V0.Model.TransferPreapproval:TransferPreapproval',
+      return !!tplId && (
+        tplId.endsWith(':Utility.Registry.App.V0.Model.TransferPreapproval:TransferPreapproval') ||
+        tplId.endsWith(':Splice.AmuletRules:TransferPreapproval')
       );
     });
     res.json({
       receiver,
-      instrumentAdmin: INSTRUMENT_ADMIN_PARTY_ID,
-      instrumentId: INSTRUMENT_ID,
+      instrumentAdmin: inst.admin,
+      instrumentId: inst.id,
       hasPreapproval,
     });
   } catch (err) {
@@ -975,6 +1217,290 @@ router.get('/user/bridge/deposits', requireUserAuth, async (req: Request, res: R
   } catch (err) {
     res.status(502).json({
       error: 'ledger_query_failed',
+      detail: (err as Error).message,
+    });
+  }
+});
+
+// ─── POST /user/bridge/agreement/request ─────────────────────────────────
+// Create a BridgeUserAgreementRequest for the caller. DA's bridge operator
+// automation accepts it out-of-band, producing the BridgeUserAgreement that
+// carries the Mint/Burn choices. Idempotent: if the user already has a
+// BridgeUserAgreement we short-circuit (nothing to request).
+router.post('/user/bridge/agreement/request', json(), requireUserAuth, async (req: Request, res: Response) => {
+  const { userParty, userToken, userId } = req as UserAuthRequest;
+
+  try {
+    const existing = await getActiveContracts(
+      sdkConfig,
+      userToken,
+      userParty,
+      { templateId: TPL_BRIDGE_USER_AGREEMENT },
+    );
+    if (existing.some((c) => (c.payload as Record<string, unknown>).user === userParty)) {
+      res.json({
+        ok: true,
+        message: 'Bridge agreement already active.',
+        alreadyActive: true,
+      });
+      return;
+    }
+
+    const result = await submitCommand(
+      sdkConfig,
+      userToken,
+      userId,
+      [userParty],
+      [
+        {
+          CreateCommand: {
+            templateId: TPL_BRIDGE_USER_AGREEMENT_REQUEST,
+            createArguments: {
+              crossChainRepresentative: INSTRUMENT_ADMIN_PARTY_ID,
+              operator: UTILITY_OPERATOR,
+              bridgeOperator: BRIDGE_OPERATOR_PARTY_ID,
+              user: userParty,
+              instrumentId: { admin: INSTRUMENT_ADMIN_PARTY_ID, id: INSTRUMENT_ID },
+              preApproval: false,
+            },
+          },
+        },
+      ],
+      { commandId: `bua-request-${Date.now()}` },
+    );
+
+    res.json({
+      ok: true,
+      message:
+        'Bridge agreement requested. It becomes active once the bridge operator accepts (usually within a minute).',
+      transactionTree: result,
+    });
+  } catch (err) {
+    res.status(502).json({
+      error: 'bua_request_failed',
+      detail: (err as Error).message,
+    });
+  }
+});
+
+// ─── POST /user/bridge/mint/:cid ─────────────────────────────────────────
+// Mint USDCx from a pending DepositAttestation (Sepolia → Canton bridge in).
+//   1. Resolve the attestation (must be visible + recipient = caller).
+//   2. Resolve the caller's BridgeUserAgreement (must exist).
+//   3. Fetch burn-mint-factory context for the attestation amount.
+//   4. Exercise BridgeUserAgreement_Mint, disclosing the factory contracts.
+router.post('/user/bridge/mint/:cid', json(), requireUserAuth, async (req: Request, res: Response) => {
+  const { userParty, userToken, userId } = req as UserAuthRequest;
+  const { cid } = req.params;
+  if (!cid || !/^[0-9a-f]+$/i.test(cid)) {
+    res.status(400).json({ error: 'invalid_cid', detail: 'invalid deposit attestation cid' });
+    return;
+  }
+
+  try {
+    const attestations = await getActiveContracts(
+      sdkConfig,
+      userToken,
+      userParty,
+      { templateId: TPL_DEPOSIT_ATTESTATION },
+    );
+    const att = attestations.find((c) => c.contractId === cid);
+    if (!att) {
+      res.status(404).json({
+        error: 'deposit_not_found',
+        detail: 'No DepositAttestation with that cid visible to your party.',
+      });
+      return;
+    }
+    if ((att.payload as Record<string, unknown>).recipient !== userParty) {
+      res.status(403).json({ error: 'not_recipient', detail: 'You are not the recipient of this deposit.' });
+      return;
+    }
+    const amount = String((att.payload as Record<string, unknown>).amount ?? '');
+    if (!amount) {
+      res.status(409).json({ error: 'attestation_missing_amount', detail: 'Deposit attestation has no amount.' });
+      return;
+    }
+
+    const buas = await getActiveContracts(
+      sdkConfig,
+      userToken,
+      userParty,
+      { templateId: TPL_BRIDGE_USER_AGREEMENT },
+    );
+    const bua = buas.find((c) => (c.payload as Record<string, unknown>).user === userParty);
+    if (!bua) {
+      res.status(409).json({
+        error: 'no_bridge_user_agreement',
+        detail: 'Request the bridge agreement first — it must be active before you can mint.',
+      });
+      return;
+    }
+
+    const ctx = await fetchBurnMintContext(
+      [],
+      [{ owner: INSTRUMENT_ADMIN_PARTY_ID, amount }],
+    );
+
+    await submitCommand(
+      sdkConfig,
+      userToken,
+      userId,
+      [userParty],
+      [
+        {
+          ExerciseCommand: {
+            templateId: TPL_BRIDGE_USER_AGREEMENT,
+            contractId: bua.contractId,
+            choice: CHOICE_BUA_MINT,
+            choiceArgument: {
+              depositAttestationCid: cid,
+              factoryCid: ctx.factoryId,
+              contextContractIds: ctx.contextContractIds,
+            },
+          },
+        },
+      ],
+      { commandId: `mint-${Date.now()}`, disclosedContracts: ctx.disclosedContracts },
+    );
+
+    res.json({
+      ok: true,
+      amount,
+      instrument: INSTRUMENT_ID,
+      message: `Minted ${formatInstrumentAmount(amount)} ${INSTRUMENT_ID}.`,
+    });
+  } catch (err) {
+    res.status(502).json({
+      error: 'mint_failed',
+      detail: (err as Error).message,
+    });
+  }
+});
+
+// ─── POST /user/bridge/withdraw ──────────────────────────────────────────
+// Bridge OUT (Canton → Ethereum): burn USDCx via BridgeUserAgreement_Burn.
+// body: { amount, destinationRecipient (0x… EVM addr), reference? }
+//   1. Resolve the caller's BridgeUserAgreement + USDCx holdings.
+//   2. Pick holdings to cover `amount`; compute exact change (fixed-point).
+//   3. burn-mint-factory context with outputs=[{owner:ADMIN, amount:change}].
+//   4. Exercise BridgeUserAgreement_Burn (destinationDomain=0 = Ethereum).
+router.post('/user/bridge/withdraw', json(), requireUserAuth, async (req: Request, res: Response) => {
+  const { userParty, userToken, userId } = req as UserAuthRequest;
+  const body = (req.body ?? {}) as { amount?: string; destinationRecipient?: string; reference?: string };
+
+  const amount = (body.amount ?? '').trim();
+  if (!/^\d+(\.\d+)?$/.test(amount) || Number(amount) <= 0) {
+    res.status(400).json({ error: 'invalid_amount', detail: 'amount must be a positive decimal' });
+    return;
+  }
+  if ((amount.split('.')[1]?.length ?? 0) > 6) {
+    res.status(400).json({ error: 'invalid_amount', detail: 'amount supports at most 6 decimal places' });
+    return;
+  }
+  const destinationRecipient = (body.destinationRecipient ?? '').trim();
+  if (!/^0x[0-9a-fA-F]{40}$/.test(destinationRecipient)) {
+    res.status(400).json({ error: 'invalid_recipient', detail: 'destinationRecipient must be a 0x… 20-byte Ethereum address' });
+    return;
+  }
+  const reference = body.reference ?? '';
+
+  try {
+    const buas = await getActiveContracts(sdkConfig, userToken, userParty, { templateId: TPL_BRIDGE_USER_AGREEMENT });
+    const bua = buas.find((c) => (c.payload as Record<string, unknown>).user === userParty);
+    if (!bua) {
+      res.status(409).json({
+        error: 'no_bridge_user_agreement',
+        detail: 'Request the bridge agreement first — it must be active before you can withdraw.',
+      });
+      return;
+    }
+
+    // Fixed-point (scale 10) so the change output is exact (float would drift).
+    const pow = 10n ** BigInt(USDCX_SCALE);
+    const toScaled = (s: string): bigint => {
+      const [int, frac = ''] = s.split('.');
+      const fracPadded = (frac + '0'.repeat(USDCX_SCALE)).slice(0, USDCX_SCALE);
+      return BigInt(int || '0') * pow + BigInt(fracPadded || '0');
+    };
+    const fromScaled = (n: bigint): string => {
+      const intPart = (n / pow).toString();
+      const fracPart = (n % pow).toString().padStart(USDCX_SCALE, '0').replace(/0+$/, '');
+      return fracPart ? `${intPart}.${fracPart}` : intPart;
+    };
+
+    const holdings = await getActiveContracts(sdkConfig, userToken, userParty, { interfaceId: IFACE_HOLDING });
+    const usdcx = holdings
+      .map((h) => ({ cid: h.contractId, view: h.interfaceView as Record<string, any> | undefined }))
+      .filter((h) => {
+        const v = h.view;
+        if (!v || v.owner !== userParty) return false;
+        const iid = (v.instrumentId ?? {}) as { admin?: string; id?: string };
+        return iid.admin === INSTRUMENT_ADMIN_PARTY_ID && iid.id === INSTRUMENT_ID;
+      })
+      .map((h) => ({ cid: h.cid, scaled: toScaled(String(h.view!.amount ?? '0')) }))
+      .filter((h) => h.scaled > 0n)
+      .sort((a, b) => (b.scaled > a.scaled ? 1 : b.scaled < a.scaled ? -1 : 0));
+
+    const need = toScaled(amount);
+    const picked: typeof usdcx = [];
+    let acc = 0n;
+    for (const h of usdcx) {
+      if (acc >= need) break;
+      picked.push(h);
+      acc += h.scaled;
+    }
+    if (acc < need) {
+      res.status(409).json({
+        error: 'insufficient_balance',
+        detail: `Need ${amount} ${INSTRUMENT_ID}; available ${fromScaled(usdcx.reduce((s, h) => s + h.scaled, 0n))}.`,
+      });
+      return;
+    }
+
+    const change = acc - need;
+    const outputs = change > 0n ? [{ owner: INSTRUMENT_ADMIN_PARTY_ID, amount: fromScaled(change) }] : [];
+    const ctx = await fetchBurnMintContext(picked.map((h) => h.cid), outputs);
+
+    const requestId = crypto.randomUUID();
+    await submitCommand(
+      sdkConfig,
+      userToken,
+      userId,
+      [userParty],
+      [
+        {
+          ExerciseCommand: {
+            templateId: TPL_BRIDGE_USER_AGREEMENT,
+            contractId: bua.contractId,
+            choice: CHOICE_BUA_BURN,
+            choiceArgument: {
+              amount,
+              destinationDomain: ETHEREUM_DOMAIN_ID,
+              destinationRecipient,
+              holdingCids: picked.map((h) => h.cid),
+              requestId,
+              reference,
+              factoryCid: ctx.factoryId,
+              contextContractIds: ctx.contextContractIds,
+            },
+          },
+        },
+      ],
+      { commandId: `burn-${Date.now()}`, disclosedContracts: ctx.disclosedContracts },
+    );
+
+    res.json({
+      ok: true,
+      amount,
+      instrument: INSTRUMENT_ID,
+      destinationRecipient,
+      requestId,
+      message: `Burn submitted: ${formatInstrumentAmount(amount)} ${INSTRUMENT_ID} → ${destinationRecipient}.`,
+    });
+  } catch (err) {
+    res.status(502).json({
+      error: 'withdraw_failed',
       detail: (err as Error).message,
     });
   }

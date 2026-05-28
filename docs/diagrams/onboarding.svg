@@ -1,0 +1,110 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="1400" viewBox="0 0 1400 1400">
+  <defs>
+    
+    <marker id="arrow-0" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#5A6A82"/>
+    </marker>
+    <marker id="arrow-1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#437EFF"/>
+    </marker>
+    <marker id="arrow-2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#F97316"/>
+    </marker>
+    <marker id="arrow-3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#10B981"/>
+    </marker>
+    <marker id="arrow-4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#8B5CF6"/>
+    </marker>
+  </defs>
+  <rect width="1400" height="1400" fill="#FFFFFF"/>
+  
+  <text x="40" y="50" font-family="Arial, Helvetica, sans-serif" font-size="22" font-weight="700" fill="#1A2233">User Onboarding — Keycloak (internal) vs Loop wallet (external)</text>
+  <text x="40" y="78" font-family="Arial, Helvetica, sans-serif" font-size="13" fill="#5A6A82">Frontend coordinates both; identity ends up as a Canton partyId either way.</text>
+
+  <!-- ── Left lane: Keycloak (top half) ── -->
+  
+  <rect x="40" y="110" width="1320" height="600" fill="#E8F0FF" stroke="#437EFF" stroke-width="1.2" rx="6" opacity="0.40"/>
+  <text x="54" y="132" font-family="Arial, Helvetica, sans-serif" font-size="13" font-weight="700" fill="#0B3A75">KEYCLOAK USER (internal)</text>
+
+  <rect x="80" y="150" width="240" height="60" fill="#E8F0FF" stroke="#437EFF" stroke-width="1.6" rx="10"/>
+  <text x="200" y="185" font-family="Arial, Helvetica, sans-serif" font-size="14" font-weight="700" text-anchor="middle" fill="#0B3A75" opacity="1">User</text>
+  <rect x="1080" y="150" width="240" height="60" fill="#F0E8FF" stroke="#8B5CF6" stroke-width="1.6" rx="10"/>
+  <text x="1200" y="185" font-family="Arial, Helvetica, sans-serif" font-size="14" font-weight="700" text-anchor="middle" fill="#4C1D95" opacity="1">Frontend</text>
+
+  <rect x="80" y="260" width="1240" height="70" fill="#E8F8F2" stroke="#10B981" stroke-width="1.6" rx="10"/>
+  <text x="700" y="292" font-family="Arial, Helvetica, sans-serif" font-size="14" font-weight="700" text-anchor="middle" fill="#064E3B" opacity="1">Mperps Backend</text>
+  <text x="700" y="308" font-family="Arial, Helvetica, sans-serif" font-size="11" font-weight="400" text-anchor="middle" fill="#064E3B" opacity="0.82">POST /signup → create KC user + Canton party (partyIdHint = KC UUID)</text>
+
+  <rect x="80" y="360" width="1240" height="70" fill="#FEF3C7" stroke="#D97706" stroke-width="1.6" rx="10"/>
+  <text x="700" y="392" font-family="Arial, Helvetica, sans-serif" font-size="14" font-weight="700" text-anchor="middle" fill="#78350F" opacity="1">Keycloak (testnet-validator realm)</text>
+  <text x="700" y="408" font-family="Arial, Helvetica, sans-serif" font-size="11" font-weight="400" text-anchor="middle" fill="#78350F" opacity="0.82">creates user with KC UUID; FE asks for Canton JWTs on demand</text>
+
+  <rect x="80" y="460" width="1240" height="70" fill="#F3F4F6" stroke="#6B7280" stroke-width="1.6" rx="10"/>
+  <text x="700" y="492" font-family="Arial, Helvetica, sans-serif" font-size="14" font-weight="700" text-anchor="middle" fill="#1F2937" opacity="1">Canton ledger (our validator)</text>
+  <text x="700" y="508" font-family="Arial, Helvetica, sans-serif" font-size="11" font-weight="400" text-anchor="middle" fill="#1F2937" opacity="0.82">party = &lt;kc-uuid&gt;::&lt;our-fingerprint&gt;</text>
+
+  <rect x="80" y="575" width="1240" height="100" fill="#FFF1E8" stroke="#F97316" stroke-width="1.6" rx="10"/>
+  <text x="700" y="614" font-family="Arial, Helvetica, sans-serif" font-size="14" font-weight="700" text-anchor="middle" fill="#7C2D12" opacity="1">Exchange Backend (be.mperps.xyz)</text>
+  <text x="700" y="630" font-family="Arial, Helvetica, sans-serif" font-size="11" font-weight="400" text-anchor="middle" fill="#7C2D12" opacity="0.82">subsequent logins: KC username/password → session cookie</text>
+  <text x="700" y="646" font-family="Arial, Helvetica, sans-serif" font-size="11" font-weight="400" text-anchor="middle" fill="#7C2D12" opacity="0.82">FE swaps cookie → Canton JWT via /v1/oauth/canton/refresh-keycloak-token</text>
+
+  <line x1="320" y1="180" x2="1080" y2="180" stroke="#437EFF" stroke-width="1.6"  marker-end="url(#arrow-1)"/>
+  <rect x="651.65" y="163" width="96.7" height="15" fill="white"/>
+  <text x="700" y="175" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="#1A2233" text-anchor="middle">1. signup form</text>
+  <line x1="1200" y1="210" x2="1200" y2="260" stroke="#437EFF" stroke-width="1.6"  marker-end="url(#arrow-1)"/>
+  <rect x="1187.95" y="218" width="24.1" height="15" fill="white"/>
+  <text x="1200" y="230" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="#1A2233" text-anchor="middle">2.</text>
+  <line x1="700" y1="330" x2="700" y2="360" stroke="#437EFF" stroke-width="1.6"  marker-end="url(#arrow-1)"/>
+  <line x1="700" y1="430" x2="700" y2="460" stroke="#437EFF" stroke-width="1.6"  marker-end="url(#arrow-1)"/>
+  <line x1="700" y1="530" x2="700" y2="575" stroke="#437EFF" stroke-width="1.6"  marker-end="url(#arrow-1)"/>
+  <rect x="642.575" y="535.5" width="114.85000000000001" height="15" fill="white"/>
+  <text x="700" y="547.5" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="#1A2233" text-anchor="middle">subsequent logins</text>
+
+  <!-- ── Right lane: Loop wallet (bottom half) ── -->
+  
+  <rect x="40" y="740" width="1320" height="540" fill="#E8F0FF" stroke="#437EFF" stroke-width="1.2" rx="6" opacity="0.40"/>
+  <text x="54" y="762" font-family="Arial, Helvetica, sans-serif" font-size="13" font-weight="700" fill="#0B3A75">LOOP WALLET USER (external)</text>
+
+  <rect x="80" y="780" width="240" height="60" fill="#E8F0FF" stroke="#437EFF" stroke-width="1.6" rx="10"/>
+  <text x="200" y="815" font-family="Arial, Helvetica, sans-serif" font-size="14" font-weight="700" text-anchor="middle" fill="#0B3A75" opacity="1">User (Loop)</text>
+  <rect x="1080" y="780" width="240" height="60" fill="#F0E8FF" stroke="#8B5CF6" stroke-width="1.6" rx="10"/>
+  <text x="1200" y="815" font-family="Arial, Helvetica, sans-serif" font-size="14" font-weight="700" text-anchor="middle" fill="#4C1D95" opacity="1">Frontend</text>
+
+  <rect x="80" y="880" width="1240" height="70" fill="#FEF3C7" stroke="#D97706" stroke-width="1.6" rx="10"/>
+  <text x="700" y="912" font-family="Arial, Helvetica, sans-serif" font-size="14" font-weight="700" text-anchor="middle" fill="#78350F" opacity="1">Loop SDK popup</text>
+  <text x="700" y="928" font-family="Arial, Helvetica, sans-serif" font-size="11" font-weight="400" text-anchor="middle" fill="#78350F" opacity="0.82">returns Provider { party_id, public_key, signMessage(...) }</text>
+
+  <rect x="80" y="980" width="1240" height="110" fill="#FFF1E8" stroke="#F97316" stroke-width="1.6" rx="10"/>
+  <text x="700" y="1016" font-family="Arial, Helvetica, sans-serif" font-size="14" font-weight="700" text-anchor="middle" fill="#7C2D12" opacity="1">Exchange Backend</text>
+  <text x="700" y="1032" font-family="Arial, Helvetica, sans-serif" font-size="11" font-weight="400" text-anchor="middle" fill="#7C2D12" opacity="0.82">GET /v1/oauth/metamask/nonce?address=&lt;partyId&gt; → nonce message</text>
+  <text x="700" y="1048" font-family="Arial, Helvetica, sans-serif" font-size="11" font-weight="400" text-anchor="middle" fill="#7C2D12" opacity="0.82">FE asks Loop to signMessage(nonce); POST /v1/oauth/verify-metamask → verify sig</text>
+  <text x="700" y="1064" font-family="Arial, Helvetica, sans-serif" font-size="11" font-weight="400" text-anchor="middle" fill="#7C2D12" opacity="0.82">→ session cookie opened, user signed in</text>
+
+  <rect x="80" y="1140" width="1240" height="70" fill="#F3F4F6" stroke="#6B7280" stroke-width="1.6" rx="10"/>
+  <text x="700" y="1172" font-family="Arial, Helvetica, sans-serif" font-size="14" font-weight="700" text-anchor="middle" fill="#1F2937" opacity="1">Loop's validator (Canton)</text>
+  <text x="700" y="1188" font-family="Arial, Helvetica, sans-serif" font-size="11" font-weight="400" text-anchor="middle" fill="#1F2937" opacity="0.82">party hosted there; signing for on-chain actions happens in Loop popup, not via our backend</text>
+
+  <line x1="320" y1="810" x2="1080" y2="810" stroke="#F97316" stroke-width="1.6"  marker-end="url(#arrow-2)"/>
+  <rect x="645.6" y="793" width="108.80000000000001" height="15" fill="white"/>
+  <text x="700" y="805" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="#1A2233" text-anchor="middle">1. click Connect</text>
+  <line x1="1200" y1="840" x2="1200" y2="880" stroke="#F97316" stroke-width="1.6"  marker-end="url(#arrow-2)"/>
+  <line x1="700" y1="950" x2="700" y2="980" stroke="#F97316" stroke-width="1.6"  marker-end="url(#arrow-2)"/>
+  <line x1="700" y1="1090" x2="700" y2="1140" stroke="#F97316" stroke-width="1.6" stroke-dasharray="6 4" marker-end="url(#arrow-2)"/>
+  <rect x="530.65" y="1098" width="338.70000000000005" height="15" fill="white"/>
+  <text x="700" y="1110" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="#1A2233" text-anchor="middle">future signing happens here (TransferFactory_Transfer)</text>
+
+  
+  <rect x="40" y="1331" width="14" height="12" fill="#E8F0FF" stroke="#437EFF" stroke-width="1" rx="2"/>
+  <text x="62" y="1341" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="#1A2233">User actor</text>
+  <rect x="40" y="1351" width="14" height="12" fill="#F0E8FF" stroke="#8B5CF6" stroke-width="1" rx="2"/>
+  <text x="62" y="1361" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="#1A2233">Frontend</text>
+  <rect x="40" y="1371" width="14" height="12" fill="#FFF1E8" stroke="#F97316" stroke-width="1" rx="2"/>
+  <text x="62" y="1381" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="#1A2233">Exchange Backend</text>
+  <rect x="40" y="1391" width="14" height="12" fill="#E8F8F2" stroke="#10B981" stroke-width="1" rx="2"/>
+  <text x="62" y="1401" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="#1A2233">Mperps Backend</text>
+  <rect x="40" y="1411" width="14" height="12" fill="#F3F4F6" stroke="#6B7280" stroke-width="1" rx="2"/>
+  <text x="62" y="1421" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="#1A2233">Canton ledger</text>
+  <rect x="40" y="1431" width="14" height="12" fill="#FEF3C7" stroke="#D97706" stroke-width="1" rx="2"/>
+  <text x="62" y="1441" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="#1A2233">External service (KC / Loop)</text>
+</svg>

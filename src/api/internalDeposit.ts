@@ -219,6 +219,13 @@ router.get('/internal-balance', async (req: Request, res: Response) => {
   }
   const sender = normalizePartyId(senderRaw);
 
+  // Optional instrument selector. Default = configured instrument (USDCx on
+  // testnet). `CC` (a.k.a. Amulet) reads the user's Canton Coin holdings —
+  // matched by instrument id only ('Amulet' has a single DSO issuer), so we
+  // don't need to carry the DSO party id here.
+  const instrumentQ = (typeof req.query.instrument === 'string' ? req.query.instrument : '').toUpperCase();
+  const wantCc = instrumentQ === 'CC' || instrumentQ === 'AMULET';
+
   let holdings;
   try {
     holdings = await getActiveContracts(sdkConfig, userToken, sender, {
@@ -236,8 +243,12 @@ router.get('/internal-balance', async (req: Request, res: Response) => {
     const view = getHoldingInterfaceView(h.payload, h.interfaceView);
     if (view.owner !== undefined && view.owner !== sender) continue;
     const iid = view.instrumentId ?? {};
-    if (iid.admin !== INSTRUMENT_ADMIN_PARTY_ID) continue;
-    if (iid.id !== INSTRUMENT_ID) continue;
+    if (wantCc) {
+      if (iid.id !== 'Amulet') continue;
+    } else {
+      if (iid.admin !== INSTRUMENT_ADMIN_PARTY_ID) continue;
+      if (iid.id !== INSTRUMENT_ID) continue;
+    }
     if (view.lock) continue;
     const amt = Number(view.amount ?? 0);
     if (!Number.isFinite(amt) || amt <= 0) continue;
@@ -248,7 +259,7 @@ router.get('/internal-balance', async (req: Request, res: Response) => {
   return res.json({
     balance,
     holdingCount: count,
-    instrumentId: INSTRUMENT_ID,
+    instrumentId: wantCc ? 'Amulet' : INSTRUMENT_ID,
   });
 });
 

@@ -13,7 +13,15 @@
  * `DAML_FAILURE: Expected admin '<USDCx-admin>' matches actual admin
  * 'DSO::...'` when we submitted a USDCx TransferFactory_Transfer.
  */
-import { UTILITY_BACKEND_URL, INSTRUMENT_ADMIN_PARTY_ID } from '../config.js';
+import { UTILITY_BACKEND_URL, INSTRUMENT_ADMIN_PARTY_ID, SCAN_API_URL } from '../config.js';
+
+/**
+ * CIP-56 transfer-factory URL for Amulet/CC — served by the Splice scan
+ * (NOT DA's per-admin utility registry, which only knows USDCx-like
+ * instruments). Path is `/registry/...`, per the exchange-v2 handoff.
+ */
+export const SCAN_TRANSFER_FACTORY_URL =
+  `${SCAN_API_URL}/registry/transfer-instruction/v1/transfer-factory`;
 
 /**
  * Per-instrument-admin CIP-56 registry base URL.
@@ -53,8 +61,9 @@ export interface EnrichedChoice {
  */
 export async function getTransferFactory(
   choiceArguments: unknown,
+  registryUrl?: string,
 ): Promise<EnrichedChoice> {
-  const url = instrumentRegistryUrl('/registry/transfer-instruction/v1/transfer-factory');
+  const url = registryUrl ?? instrumentRegistryUrl('/registry/transfer-instruction/v1/transfer-factory');
   const res = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Accept: 'application/json' },

@@ -157,6 +157,9 @@ if (process.env.AWS_LAMBDA_FUNCTION_NAME === undefined) {
     console.log('  POST /user/transfers/:cid/accept — accept incoming USDCx');
     console.log('  POST /user/transfers/:cid/cancel — sender-side withdraw');
     console.log('  GET  /user/bridge/deposits   — Sepolia→Canton DepositAttestations');
+    console.log('  POST /user/bridge/agreement/request — request a BridgeUserAgreement');
+    console.log('  POST /user/bridge/mint/:cid  — mint USDCx from a DepositAttestation');
+    console.log('  POST /user/bridge/withdraw   — burn USDCx → Ethereum (bridge out)');
     console.log('  POST /kyc/start             — create a Persona inquiry');
     console.log('  POST /kyc/webhook           — Persona event sink (HMAC verified)');
     console.log('  GET  /admin/invite-codes    — admin (x-api-key)');
