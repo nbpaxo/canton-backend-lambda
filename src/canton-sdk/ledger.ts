@@ -51,10 +51,33 @@ export async function getActiveContracts(
 ): Promise<ActiveContract[]> {
   const activeAtOffset = await getLedgerEndOffset(config, token);
 
-  const identifierFilter =
-    'templateId' in filter
-      ? { TemplateFilter: { value: { templateId: filter.templateId, includeCreatedEventBlob: false } } }
-      : { InterfaceFilter: { value: { interfaceId: filter.interfaceId, includeInterfaceView: true, includeCreatedEventBlob: false } } };
+  // The mainnet participant rejects a server-side TemplateFilter that carries a
+  // raw package-id ("Invalid field packageId … expected a package name"). The
+  // testnet participant accepted it; same code, different validator behavior.
+  // So for TEMPLATE queries we send an EMPTY per-party filter (all of the
+  // party's active contracts) and match the template CLIENT-SIDE via
+  // `templateIdsMatch` (which handles package-id ↔ #package-name aliasing).
+  // This mirrors exchange-v2's `acsByTemplate`, proven against this validator.
+  // INTERFACE queries stay server-side: they need `includeInterfaceView`, and
+  // the interfaceId is already a package-name reference (accepted).
+  const perPartyFilter =
+    'interfaceId' in filter
+      ? {
+          cumulative: [
+            {
+              identifierFilter: {
+                InterfaceFilter: {
+                  value: {
+                    interfaceId: filter.interfaceId,
+                    includeInterfaceView: true,
+                    includeCreatedEventBlob: false,
+                  },
+                },
+              },
+            },
+          ],
+        }
+      : {}; // empty = every active contract for the party; filtered below
 
   const res = await fetch(`${config.cantonLedgerApi}/v2/state/active-contracts`, {
     method: 'POST',
@@ -63,11 +86,7 @@ export async function getActiveContracts(
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({
-      filter: {
-        filtersByParty: {
-          [partyId]: { cumulative: [{ identifierFilter }] },
-        },
-      },
+      filter: { filtersByParty: { [partyId]: perPartyFilter } },
       verbose: false,
       activeAtOffset,
     }),
@@ -78,7 +97,7 @@ export async function getActiveContracts(
   const data = await res.json() as any;
   const entries: any[] = Array.isArray(data) ? data : (data.entries || data.activeContracts || []);
 
-  return entries
+  const contracts = entries
     .map((e: any): ActiveContract | null => {
       const ce = e.contractEntry ?? e;
       const ac = ce.JsActiveContract ?? ce;
@@ -95,6 +114,12 @@ export async function getActiveContracts(
       };
     })
     .filter((c): c is ActiveContract => c !== null);
+
+  // Client-side template match (the server didn't filter for the template path).
+  if ('templateId' in filter) {
+    return contracts.filter((c) => templateIdsMatch(c.templateId, filter.templateId));
+  }
+  return contracts;
 }
 
 // ─── Command Submission ──────────────────────────────────────────────────────

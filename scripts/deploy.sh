@@ -3,8 +3,13 @@
 # Deploy canton-backend-lambda to AWS Lambda.
 #
 # Usage:
-#   ./scripts/deploy.sh                  # deploy to default function
-#   ./scripts/deploy.sh my-function      # deploy to a specific function name
+#   ./scripts/deploy.sh                  # deploy CODE ONLY — env vars left untouched
+#   ./scripts/deploy.sh --update-env     # also overwrite Lambda env from .env.lambda/.env
+#
+# By default the deployed function's Environment.Variables are LEFT AS-IS;
+# only the code is updated. Pass --update-env (or -e) to push env vars from
+# .env.lambda (preferred) or .env. This prevents an accidental deploy from
+# clobbering env values set in the console.
 #
 # Prerequisites:
 #   - AWS CLI configured (aws configure)
@@ -12,11 +17,19 @@
 #
 set -euo pipefail
 
-FUNCTION_NAME="${1:-canton-backend-lambda}"
+FUNCTION_NAME="mainnet-canton-backend-lambda"
 REGION="${AWS_REGION:-ap-southeast-5}"
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 BUILD_DIR="$ROOT_DIR/.lambda-build"
 ZIP_FILE="$ROOT_DIR/lambda.zip"
+
+# Env-var push is OFF by default; enable explicitly with --update-env / -e.
+UPDATE_ENV=false
+for arg in "$@"; do
+  case "$arg" in
+    --update-env|--env|-e) UPDATE_ENV=true ;;
+  esac
+done
 
 echo "==> Building TypeScript..."
 cd "$ROOT_DIR"
@@ -54,6 +67,7 @@ aws lambda wait function-updated \
   --function-name "$FUNCTION_NAME" \
   --region "$REGION"
 
+if [ "$UPDATE_ENV" = true ]; then
 echo "==> Updating environment variables..."
 # Source-of-truth for the env vars pushed to Lambda:
 #   1. If `.env.lambda` exists in the repo root, use it. This is the
@@ -104,6 +118,10 @@ aws lambda update-function-configuration \
   --no-cli-pager > /dev/null
 
 rm -f "$ENV_JSON"
+else
+  echo "==> Skipping environment variables (code-only deploy)."
+  echo "    Pass --update-env to push .env.lambda/.env to the function."
+fi
 
 echo "==> Cleanup..."
 rm -rf "$BUILD_DIR" "$ZIP_FILE"
