@@ -48,7 +48,7 @@ import {
 } from '../config.js';
 import type { CantonSdkConfig } from '../canton-sdk/config.js';
 import { TPL_DEPOSIT_RECORD } from '../canton-sdk/config.js';
-import { submitCommand } from '../canton-sdk/ledger.js';
+import { submitCommand, collectExerciseEvents } from '../canton-sdk/ledger.js';
 import { getOperatorToken } from '../canton-sdk/tokens.js';
 import { resolveOperatorCantonId } from '../canton-sdk/operator.js';
 import { sendAmulet } from '../canton-sdk/operatorTransfer.js';
@@ -941,6 +941,26 @@ function parseSplitChildren(
   result: Record<string, unknown>,
   needed: string,
 ): { smallCid: string | null; bigCid: string | null } {
+  // Preferred: read SplitForWithdrawal's exercise RESULT. The choice returns
+  // `(a, b)` where a.amount = splitAmount (the part we Consume) and
+  // b.amount = remainder (the change to keep). This is deterministic even
+  // when the two children have equal amounts. The old amount-matching below
+  // silently set bigCid=null when needed == change, which dropped the change
+  // DepositRecord from the DB and left a stale cid for the next withdraw.
+  for (const ev of collectExerciseEvents(result)) {
+    if (ev.choice !== 'SplitForWithdrawal') continue;
+    const r = ev.exerciseResult;
+    if (Array.isArray(r) && r.length >= 2) {
+      return { smallCid: (r[0] as string) ?? null, bigCid: (r[1] as string) ?? null };
+    }
+    const pair = r as { _1?: string; _2?: string } | undefined;
+    if (pair && (pair._1 || pair._2)) {
+      return { smallCid: pair._1 ?? null, bigCid: pair._2 ?? null };
+    }
+  }
+
+  // Fallback (missing exerciseResult / older response shapes): match the two
+  // created DepositRecord children by amount.
   const eventsById =
     ((result as { transactionTree?: { eventsById?: Record<string, unknown> } }).transactionTree
       ?.eventsById) ?? {};

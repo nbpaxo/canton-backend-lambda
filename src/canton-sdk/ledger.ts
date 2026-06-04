@@ -393,6 +393,8 @@ export interface ExerciseEvent {
   contractId?: string;
   choice?: string;
   choiceArgument?: Record<string, unknown>;
+  /** The choice's return value (e.g. SplitForWithdrawal returns the (a,b) child cids). */
+  exerciseResult?: unknown;
   actingParties?: string[];
 }
 export function collectExerciseEvents(tree: Record<string, unknown>): ExerciseEvent[] {
