@@ -6,5 +6,4 @@ dist
 
 .lambda-build
 lambda.zip
-
 *.csv
