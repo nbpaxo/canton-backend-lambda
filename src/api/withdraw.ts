@@ -45,6 +45,7 @@ import {
   OPERATOR_KC_PASSWORD,
   PACKAGE_ID,
   PARTIES,
+  EXCHANGE_API_HEADER,
 } from '../config.js';
 import type { CantonSdkConfig } from '../canton-sdk/config.js';
 import { TPL_DEPOSIT_RECORD } from '../canton-sdk/config.js';
@@ -53,6 +54,7 @@ import { getOperatorToken } from '../canton-sdk/tokens.js';
 import { resolveOperatorCantonId } from '../canton-sdk/operator.js';
 import { sendAmulet } from '../canton-sdk/operatorTransfer.js';
 import { getUserDepositRecords } from '../canton-sdk/depositRecords.js';
+import { signPayload } from '../exchangeAuth.js';
 
 const sdkConfig: CantonSdkConfig = {
   cantonLedgerApi: CANTON_LEDGER_API,
@@ -1065,9 +1067,11 @@ async function postExchangeWithdrawFinalize(args: {
     };
   }
   try {
+    const headers: any = { 'Content-Type': 'application/json' };
+    headers[EXCHANGE_API_HEADER] = signPayload(JSON.stringify(requestPayload));
     const res = await fetch(EXCHANGE_WITHDRAW_URL, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers,
       body: JSON.stringify(requestPayload),
     });
     const body = await res.json().catch(() => ({}));

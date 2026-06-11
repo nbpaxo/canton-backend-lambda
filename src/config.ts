@@ -156,3 +156,7 @@ export const ADMIN_API_KEY = process.env.ADMIN_API_KEY || 'canton-admin-secret';
 
 // Server port (for local dev; Lambda ignores this)
 export const PORT = Number(process.env.PORT) || 3003;
+
+export const EXCHANGE_API_HEADER = process.env.EXCHANGE_API_HEADER || 'x-liminal-signature';
+export const EXCHANGE_API_SECRET = process.env.EXCHANGE_API_SECRET || '';
+

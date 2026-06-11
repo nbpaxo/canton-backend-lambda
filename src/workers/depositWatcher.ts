@@ -33,6 +33,7 @@ import {
   OPERATOR_KC_PASSWORD,
   PACKAGE_ID,
   PARTIES,
+  EXCHANGE_API_HEADER
 } from '../config.js';
 import type { CantonSdkConfig } from '../canton-sdk/config.js';
 import {
@@ -51,6 +52,7 @@ import {
 } from '../canton-sdk/ledger.js';
 import { getOperatorToken } from '../canton-sdk/tokens.js';
 import { resolveOperatorCantonId } from '../canton-sdk/operator.js';
+import { signPayload } from '../exchangeAuth.js';
 
 const INTERVAL_MS = Number(process.env.WATCHER_INTERVAL_MS ?? 5_000);
 // Stop hammering the exchange API after this many failed attempts per deposit.
@@ -655,16 +657,20 @@ async function notifyExchangeDeposit(args: {
     return { ok: false, status: 0, body: { error: 'EXCHANGE_DEPOSIT_URL not set' } };
   }
   try {
-    const res = await fetch(EXCHANGE_DEPOSIT_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
+    const payload =  JSON.stringify({
         walletAddress: args.partyId,
         coin: args.coin,
         amount: Number(args.amount),
         txnHash: args.txRef,
         network: '0',
-      }),
+      });
+    const headers: any = { 'Content-Type': 'application/json' }
+    headers[EXCHANGE_API_HEADER] = signPayload(payload);
+
+    const res = await fetch(EXCHANGE_DEPOSIT_URL, {
+      method: 'POST',
+      headers,
+      body: payload
     });
     const body = await res.json().catch(() => ({}));
     return { ok: res.ok, status: res.status, body };
