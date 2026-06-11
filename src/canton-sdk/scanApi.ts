@@ -119,7 +119,9 @@ function parseEnrichedChoice(raw: unknown, label: string): EnrichedChoice {
       'createdEventBlob', 'created_event_blob',
       'synchronizerId', 'synchronizer_id',
     ]) {
-      if (d[k] !== undefined) out[k] = d[k];
+      // `!= null` drops BOTH null and undefined — Canton's submit decoder
+      // rejects `synchronizerId: null` (it must be a string or absent).
+      if (d[k] != null) out[k] = d[k];
     }
     return out;
   });

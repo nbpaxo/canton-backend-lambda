@@ -31,6 +31,8 @@ interface KycRow {
   inquiry_id: string;
   status: string;
   decision: string | null;
+  reject_reason: string | null;
+  resubmit_allowed: boolean | null;
   updated_at: Date;
   completed_at: Date | null;
 }
@@ -53,7 +55,7 @@ router.get('/me', requireAuth, async (req: Request, res: Response) => {
   // Latest KYC inquiry, if any.
   const kycRow = (
     await pool.query<KycRow>(
-      `SELECT inquiry_id, status, decision, updated_at, completed_at
+      `SELECT inquiry_id, status, decision, reject_reason, resubmit_allowed, updated_at, completed_at
          FROM kyc_inquiries
         WHERE user_party_id = $1
         ORDER BY created_at DESC
@@ -67,6 +69,8 @@ router.get('/me', requireAuth, async (req: Request, res: Response) => {
         inquiryId: kycRow.inquiry_id,
         status: kycRow.status,
         decision: kycRow.decision,
+        rejectReason: kycRow.reject_reason,
+        resubmitAllowed: kycRow.resubmit_allowed ?? false,
         updatedAt: kycRow.updated_at.toISOString(),
         completedAt: kycRow.completed_at?.toISOString() ?? null,
       }
@@ -74,6 +78,8 @@ router.get('/me', requireAuth, async (req: Request, res: Response) => {
         inquiryId: null,
         status: 'not_started',
         decision: null,
+        rejectReason: null,
+        resubmitAllowed: false,
         updatedAt: null,
         completedAt: null,
       };

@@ -17,6 +17,12 @@ import {
   PERSONA_TEMPLATE_ID,
   PERSONA_WEBHOOK_SECRET,
 } from '../config.js';
+import type {
+  KycProvider,
+  KycStartResult,
+  NormalizedKycEvent,
+  WebhookHeaders,
+} from './types.js';
 
 export interface CreateInquiryArgs {
   /** Our reference id — Persona echoes this back in webhook events. */
@@ -226,3 +232,60 @@ export function normalizeEventStatus(eventName: string): {
     default:                           return { status: eventName.replace(/^inquiry\./, ''), decision: null };
   }
 }
+
+// ─── KycProvider implementation ──────────────────────────────────────────
+export const personaProvider: KycProvider = {
+  name: 'persona',
+
+  async startVerification({ userParty, existingInquiryId }): Promise<KycStartResult> {
+    let inquiryId: string;
+    let isNew = false;
+    if (existingInquiryId) {
+      // Resume the existing inquiry — same id, fresh single-use session token.
+      inquiryId = existingInquiryId;
+    } else {
+      const inquiry = await createInquiry({ referenceId: userParty });
+      inquiryId = inquiry.id;
+      isNew = true;
+    }
+    const { sessionToken } = await createInquirySession(inquiryId);
+    const sessionUrl = buildInquiryUrl(inquiryId, sessionToken);
+    return { inquiryId, sessionUrl, templateRef: PERSONA_TEMPLATE_ID || undefined, isNew };
+  },
+
+  verifyWebhook(rawBody: string, headers: WebhookHeaders): boolean {
+    const sig = headers['persona-signature'];
+    return verifyWebhookSignature(rawBody, Array.isArray(sig) ? sig[0] : sig);
+  },
+
+  parseWebhookEvent(rawBody: string): NormalizedKycEvent | null {
+    let evt: {
+      data?: {
+        attributes?: {
+          name?: string;
+          payload?: { data?: { id?: string; attributes?: Record<string, unknown> } };
+        };
+      };
+    };
+    try {
+      evt = JSON.parse(rawBody);
+    } catch {
+      return null;
+    }
+    const eventName = evt.data?.attributes?.name ?? '';
+    const inq = evt.data?.attributes?.payload?.data;
+    const inquiryId = inq?.id;
+    const referenceId = inq?.attributes?.['reference-id'] as string | undefined;
+    if (!inquiryId || !referenceId) return null;
+    const completedAt = (inq?.attributes?.['completed-at'] as string | null | undefined) ?? null;
+    const { status, decision } = normalizeEventStatus(eventName);
+    return {
+      inquiryId,
+      referenceId,
+      status,
+      decision: decision as NormalizedKycEvent['decision'],
+      completedAt,
+      eventName,
+    };
+  },
+};

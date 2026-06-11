@@ -22,7 +22,7 @@ import internalDepositRoutes from './api/internalDeposit.js';
 import userTransfersRoutes from './api/userTransfers.js';
 import withdrawRoutes from './api/withdraw.js';
 import withdrawalsRoutes from './api/withdrawals.js';
-import { PORT, CORS_ORIGINS } from './config.js';
+import { PORT, CORS_ORIGINS, KYC_PROVIDER } from './config.js';
 
 // ─── Cold-start banner ───────────────────────────────────────────────────
 // Logged once per Lambda container init (= once per cold start). Gives
@@ -160,8 +160,9 @@ if (process.env.AWS_LAMBDA_FUNCTION_NAME === undefined) {
     console.log('  POST /user/bridge/agreement/request — request a BridgeUserAgreement');
     console.log('  POST /user/bridge/mint/:cid  — mint USDCx from a DepositAttestation');
     console.log('  POST /user/bridge/withdraw   — burn USDCx → Ethereum (bridge out)');
-    console.log('  POST /kyc/start             — create a Persona inquiry');
-    console.log('  POST /kyc/webhook           — Persona event sink (HMAC verified)');
+    console.log(`  POST /kyc/start             — start KYC (active provider: ${KYC_PROVIDER})`);
+    console.log('  POST /kyc/webhook/persona   — Persona event sink (HMAC verified)');
+    console.log('  POST /kyc/webhook/sumsub    — Sumsub event sink (x-payload-digest)');
     console.log('  GET  /admin/invite-codes    — admin (x-api-key)');
   });
 }

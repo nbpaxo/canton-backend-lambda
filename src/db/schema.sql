@@ -43,13 +43,18 @@ CREATE INDEX IF NOT EXISTS invite_codes_unredeemed_idx
 -- One row per Persona inquiry. Webhook events upsert by inquiry_id; the
 -- current state is `status`. We never delete — full lifecycle audit lives
 -- here for compliance.
+-- Provider-agnostic KYC records. One row per provider verification record.
+-- See src/kyc/types.ts for the generic column mapping (Persona / Sumsub).
 CREATE TABLE IF NOT EXISTS kyc_inquiries (
-  inquiry_id      TEXT PRIMARY KEY,        -- Persona inquiry_id (inq_xxxx)
+  inquiry_id      TEXT PRIMARY KEY,        -- provider primary id: Persona inquiry (inq_…) / Sumsub applicantId
   user_party_id   TEXT NOT NULL REFERENCES users(party_id),
-  template_id     TEXT,                    -- Persona template (itmpl_xxxx)
-  reference_id    TEXT,                    -- our internal ref echoed back by Persona
-  status          TEXT NOT NULL,           -- created | pending | completed | approved | declined | needs_review | expired
+  provider        TEXT NOT NULL DEFAULT 'persona', -- 'persona' | 'sumsub'
+  template_id     TEXT,                    -- verification template/level: Persona template (itmpl_…) / Sumsub levelName
+  reference_id    TEXT,                    -- our party id echoed back (Persona reference-id / Sumsub externalUserId)
+  status          TEXT NOT NULL,           -- created | pending | completed | approved | declined | needs_review | expired | failed | redacted
   decision        TEXT,                    -- approved | declined | needs_review | null
+  reject_reason    TEXT,                   -- human-readable reason on a rejection (Sumsub moderation/client comment)
+  resubmit_allowed BOOLEAN,                -- true when a declined verification may be resubmitted (Sumsub RED + RETRY)
   created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   completed_at    TIMESTAMPTZ,
@@ -57,6 +62,11 @@ CREATE TABLE IF NOT EXISTS kyc_inquiries (
 );
 CREATE INDEX IF NOT EXISTS kyc_inquiries_user_idx
   ON kyc_inquiries (user_party_id, created_at DESC);
+-- Generic provider column for DBs created before the multi-provider refactor.
+ALTER TABLE kyc_inquiries
+  ADD COLUMN IF NOT EXISTS provider TEXT NOT NULL DEFAULT 'persona',
+  ADD COLUMN IF NOT EXISTS reject_reason TEXT,
+  ADD COLUMN IF NOT EXISTS resubmit_allowed BOOLEAN;
 
 
 -- ─── Watcher checkpoint (Canton update-stream offset) ────────────────────

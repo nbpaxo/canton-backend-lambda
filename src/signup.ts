@@ -28,10 +28,9 @@ import {
   KEYCLOAK_REALM,
   KEYCLOAK_CLIENT_ID,
   KEYCLOAK_CLIENT_SECRET,
-  KC_ADMIN_USERNAME,
-  KC_ADMIN_PASSWORD,
   ADMIN_API_KEY,
 } from './config.js';
+import { getKcAdminToken } from './keycloak.js';
 
 const router = Router();
 
@@ -61,31 +60,7 @@ function validateSignup(body: SignupBody): string | null {
   return null;
 }
 
-// ─── KC Admin helpers ───────────────────────────────────────────────────────
-
-let kcAdminTokenCache: { token: string; expiry: number } | null = null;
-
-async function getKcAdminToken(): Promise<string> {
-  if (kcAdminTokenCache && Date.now() < kcAdminTokenCache.expiry - 30_000) {
-    return kcAdminTokenCache.token;
-  }
-
-  const res = await fetch(`${KEYCLOAK_BASE}/realms/master/protocol/openid-connect/token`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({
-      client_id: 'admin-cli',
-      username: KC_ADMIN_USERNAME,
-      password: KC_ADMIN_PASSWORD,
-      grant_type: 'password',
-    }),
-  });
-
-  if (!res.ok) throw new Error(`KC admin token failed (${res.status}): ${await res.text()}`);
-  const data = await res.json() as { access_token: string; expires_in: number };
-  kcAdminTokenCache = { token: data.access_token, expiry: Date.now() + data.expires_in * 1000 };
-  return data.access_token;
-}
+// KC admin token + user lookups live in ./keycloak.js (getKcAdminToken).
 
 // ─── Validate Invite Code ──────────────────────────────────────────────────
 

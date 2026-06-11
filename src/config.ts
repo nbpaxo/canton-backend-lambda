@@ -127,6 +127,13 @@ export const INSTRUMENT_ADMIN_PARTY_ID = process.env.INSTRUMENT_ADMIN_PARTY_ID
 export const CORS_ORIGINS = (process.env.CORS_ORIGINS
   || 'http://localhost:3000,http://localhost:5173,https://testnet.mperps.xyz').split(',');
 
+// ─── KYC provider selector ──────────────────────────────────────────────
+// Which KYC integration is active. Exactly ONE runs at a time. The DB schema
+// and /kyc routes are provider-agnostic; only this switch + the provider's
+// own credentials change. Webhooks have per-provider endpoints
+// (/kyc/webhook/persona, /kyc/webhook/sumsub) so both can stay configured.
+export const KYC_PROVIDER = (process.env.KYC_PROVIDER || 'persona').toLowerCase();
+
 // ─── Persona Sandbox (KYC) ──────────────────────────────────────────────
 export const PERSONA_API_KEY = process.env.PERSONA_API_KEY || '';
 export const PERSONA_WEBHOOK_SECRET = process.env.PERSONA_WEBHOOK_SECRET || '';
@@ -145,6 +152,30 @@ export const PERSONA_API_BASE = process.env.PERSONA_API_BASE || 'https://withper
 // frontend domain that AppLayout's `?kyc=1` handler is watching.
 export const PERSONA_REDIRECT_URI =
   process.env.PERSONA_REDIRECT_URI || 'https://testnet.mperps.xyz?kyc=1';
+
+// ─── Sumsub (KYC) ───────────────────────────────────────────────────────
+// API requests are signed with HMAC-SHA256 over (ts + method + path + body)
+// using SUMSUB_SECRET_KEY, sent with X-App-Token / X-App-Access-Sig /
+// X-App-Access-Ts. Webhooks are verified with SUMSUB_WEBHOOK_SECRET against
+// the `x-payload-digest` header. SUMSUB_LEVEL_NAME is the verification level
+// (Sumsub's analogue of a Persona template).
+export const SUMSUB_APP_TOKEN = process.env.SUMSUB_APP_TOKEN || '';
+export const SUMSUB_SECRET_KEY = process.env.SUMSUB_SECRET_KEY || '';
+export const SUMSUB_WEBHOOK_SECRET = process.env.SUMSUB_WEBHOOK_SECRET || '';
+export const SUMSUB_LEVEL_NAME = process.env.SUMSUB_LEVEL_NAME || 'basic-kyc-level';
+export const SUMSUB_API_BASE = process.env.SUMSUB_API_BASE || 'https://api.sumsub.com';
+// TTL (seconds) for the generated WebSDK external link the user opens.
+export const SUMSUB_LINK_TTL_SECS = Number(process.env.SUMSUB_LINK_TTL_SECS || '1800');
+// Where Sumsub's hosted WebSDK flow redirects the browser when the user taps
+// Finish (its analogue of Persona's redirect-uri). Reuses the SAME redirect
+// target as Persona by default — the frontend's AppLayout watches `?kyc=1` and
+// re-opens the KYC modal regardless of provider. Override independently if the
+// Sumsub flow ever needs a different landing page.
+export const SUMSUB_REDIRECT_URI = process.env.SUMSUB_REDIRECT_URI || PERSONA_REDIRECT_URI;
+// Optional: when set, Sumsub appends a signed JWT (HS256 over this key) to the
+// redirect URL so the landing page can verify the outcome. We don't rely on it
+// for the decision (the webhook is the source of truth), so it's off unless set.
+export const SUMSUB_REDIRECT_SIGN_KEY = process.env.SUMSUB_REDIRECT_SIGN_KEY || '';
 
 // Postgres (devnet branch — replaces DynamoDB for invite codes / users / KYC).
 // Defaults match the docker-compose service.

@@ -215,15 +215,33 @@ async function fetchBurnMintContext(
     appRewardConfigurationCid: cid(CTX_KEY_APP_REWARD_CONFIG),
     featuredAppRightCid: cid(CTX_KEY_FEATURED_APP_RIGHT),
   };
-  // Dedupe disclosed contracts by contract id (Canton 3.4 rejects dups).
+  // Normalize each disclosed contract to the core disclosure fields and DROP
+  // null/undefined values — Canton's submit decoder rejects
+  // `synchronizerId: null` ("Got value 'null' with wrong type, expecting
+  // string at 'synchronizerId'"). It must be a string or absent. Then dedupe
+  // by contractId (Canton 3.4 rejects duplicate cids in a submit).
   const seen = new Set<string>();
-  const disclosedContracts = (j.choiceContext?.disclosedContracts ?? []).filter((d) => {
-    const c = (d as { contractId?: string }).contractId;
-    if (!c) return true;
-    if (seen.has(c)) return false;
-    seen.add(c);
-    return true;
-  });
+  const disclosedContracts = (j.choiceContext?.disclosedContracts ?? [])
+    .map((d) => {
+      const src = d as Record<string, unknown>;
+      const out: Record<string, unknown> = {};
+      for (const k of [
+        'templateId', 'template_id',
+        'contractId', 'contract_id',
+        'createdEventBlob', 'created_event_blob',
+        'synchronizerId', 'synchronizer_id',
+      ]) {
+        if (src[k] != null) out[k] = src[k];
+      }
+      return out;
+    })
+    .filter((d) => {
+      const c = (d.contractId ?? d.contract_id) as string | undefined;
+      if (!c) return true;
+      if (seen.has(c)) return false;
+      seen.add(c);
+      return true;
+    });
   return { factoryId: j.factoryId, contextContractIds, disclosedContracts };
 }
 
