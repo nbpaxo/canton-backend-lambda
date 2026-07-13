@@ -28,6 +28,8 @@ import { Router, Request, Response } from 'express';
 import { json } from 'express';
 import type { Pool } from 'pg';
 import { getPool } from '../db/pool.js';
+import { registerAlert } from '../alerts/index.js';
+import type { AlertSeverity } from '../alerts/index.js';
 import { authenticateWithdraw } from '../withdrawAuth.js';
 import { normalizePartyId } from '../auth.js';
 import { lookupWithdrawApproval } from '../services/withdrawApproval.js';
@@ -446,6 +448,38 @@ type WithdrawFailureStep =
   | 'exchange-api-fail'
   | 'on-chain-failed';
 
+/**
+ * Map a failure step to an alert severity.
+ *   • on-chain-failed → CRITICAL: exchange already debited, ledger move
+ *     failed — user is DEBITED with no on-chain offset (manual settlement).
+ *   • auth / exchange-api-fail → WARNING: balance is LOCKED at the exchange
+ *     (debit didn't happen) — needs an unlock.
+ *   • lookup / replay → INFO: recorded for the trail; usually no action.
+ */
+function severityForFailureStep(step: WithdrawFailureStep): AlertSeverity {
+  if (step === 'on-chain-failed') return 'critical';
+  if (step === 'lookup' || step === 'replay') return 'info';
+  return 'warning'; // auth, exchange-api-fail
+}
+
+/** One-line operator guidance for the alert body, per failure step. */
+function actionHintForFailureStep(step: WithdrawFailureStep): string {
+  switch (step) {
+    case 'on-chain-failed':
+      return 'Exchange already debited but the on-chain transfer / DepositRecord burn failed. User is DEBITED with NO on-chain offset — needs manual settlement or the on-chain retry pass.';
+    case 'exchange-api-fail':
+      return 'Exchange-backend rejected the withdraw before any on-chain work. Balance is LOCKED (debit did not happen) — needs unlock at exchange-backend.';
+    case 'auth':
+      return 'Caller could not be verified after the approval was minted. Balance is LOCKED — needs unlock at exchange-backend.';
+    case 'lookup':
+      return 'Approval lookup was rejected (expired / not found / already finalized). Usually no action needed.';
+    case 'replay':
+      return 'Same approval submitted twice. Balance state should already match the first attempt. Usually no action needed.';
+    default:
+      return '';
+  }
+}
+
 async function recordFailedAttempt(
   pool: Pool,
   args: {
@@ -477,6 +511,22 @@ async function recordFailedAttempt(
     console.log(
       `[withdraw] recorded failed_withdraw_attempt step=${args.failureStep} approval=${args.approvalId ?? '<none>'}`,
     );
+    // Fire an ops alert. Best-effort — registerAlert never throws — so a
+    // Telegram/DB hiccup can't affect the withdraw failure path. dedup_key is
+    // unique per approval+step, so each distinct failure alerts once.
+    await registerAlert(pool, {
+      type: 'withdraw_failed',
+      severity: severityForFailureStep(args.failureStep),
+      dedupKey: `withdraw_failed:${args.approvalId ?? args.nonce ?? 'unknown'}:${args.failureStep}`,
+      title: `Withdraw failed — ${args.failureStep}`,
+      body: `${args.failureReason.slice(0, 500)}\n\n${actionHintForFailureStep(args.failureStep)}`,
+      context: {
+        approvalId: args.approvalId ?? '(none)',
+        user: args.userPartyId ?? '(unknown)',
+        amount: args.amount ?? '(unknown)',
+        step: args.failureStep,
+      },
+    });
     return;
   } catch (primaryErr) {
     // eslint-disable-next-line no-console
@@ -522,6 +572,27 @@ async function recordFailedAttempt(
       },
     );
   }
+
+  // Reaching here means the failed_withdraw_attempts INSERT itself failed
+  // (we're in the last-ditch path). That's worse than a normal withdraw
+  // failure — the ops queue is missing the row — so always CRITICAL.
+  // Best-effort; if the DB is fully down this no-ops too.
+  await registerAlert(pool, {
+    type: 'withdraw_failed',
+    severity: 'critical',
+    dedupKey: `withdraw_failed:record-missed:${args.approvalId ?? args.nonce ?? 'unknown'}`,
+    title: 'Withdraw failure record MISSED',
+    body:
+      `Could not INSERT the failed_withdraw_attempts row (step=${args.failureStep}); ` +
+      `only an audit_log fallback may exist. Manual reconciliation needed. ` +
+      `Reason: ${args.failureReason.slice(0, 400)}`,
+    context: {
+      approvalId: args.approvalId ?? '(none)',
+      user: args.userPartyId ?? '(unknown)',
+      amount: args.amount ?? '(unknown)',
+      step: args.failureStep,
+    },
+  });
 }
 
 interface OnChainResult {

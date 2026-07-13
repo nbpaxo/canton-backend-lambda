@@ -33,8 +33,12 @@ import {
   OPERATOR_KC_PASSWORD,
   PACKAGE_ID,
   PARTIES,
-  EXCHANGE_API_HEADER
+  EXCHANGE_API_HEADER,
+  BRIDGE_OPERATOR_PARTY_ID,
+  UTILITY_OPERATOR_PARTY_ID,
 } from '../config.js';
+import { registerAlert, runAlertProcessor } from '../alerts/index.js';
+import { writeHeartbeat } from './heartbeat.js';
 import type { CantonSdkConfig } from '../canton-sdk/config.js';
 import {
   IFACE_HOLDING,
@@ -102,6 +106,22 @@ const unmatchedLogged = new Set<string>();
 const lookupFailures = new Map<string, number>();
 const MAX_LOOKUP_FAILURES = 3;
 
+// Parties that are ours/internal — a transfer to the vault from one of these
+// is internal movement (change from a withdrawal, treasury top-up, bridge),
+// NOT an unattributed user deposit. It's still recorded in held_deposits for
+// the trail, but it never raises an "unknown user" alert.
+const INTERNAL_PARTIES = new Set<string>(
+  [
+    PARTIES.operator,
+    PARTIES.vaultPool,
+    PARTIES.treasury,
+    PARTIES.tokenIssuer,
+    INSTRUMENT_ADMIN_PARTY_ID,
+    BRIDGE_OPERATOR_PARTY_ID,
+    UTILITY_OPERATOR_PARTY_ID,
+  ].filter(Boolean),
+);
+
 async function main(): Promise<void> {
   const pool = getPool();
   await sanityCheckDb(pool);
@@ -118,6 +138,15 @@ async function main(): Promise<void> {
       await tick(pool);
     } catch (err) {
       log(`tick error (continuing): ${(err as Error).message}`);
+    }
+    // Drain the ops-alert queue to Telegram. This is the single delivery
+    // point — alerts registered here AND by the Lambda (same RDS) go out
+    // from this process. Isolated so a delivery hiccup can't stall the watcher.
+    try {
+      const r = await runAlertProcessor(pool);
+      if (r.sent || r.failed) log(`alerts: sent ${r.sent}, failed ${r.failed}`);
+    } catch (err) {
+      log(`alert processor error (continuing): ${(err as Error).message}`);
     }
     await sleep(INTERVAL_MS, stopSignal);
   }
@@ -214,6 +243,10 @@ async function backfillSourceHoldingCids(pool: Pool): Promise<void> {
  *  5. Persist the new ledger end so the next tick only sees deltas.
  */
 async function tick(pool: Pool): Promise<void> {
+  // Liveness first, before any early return — so the heartbeat advances every
+  // tick even on idle ticks (writeCheckpoint doesn't run when nothing is new).
+  await writeHeartbeat(pool, 'deposit-watcher', { intervalMs: INTERVAL_MS });
+
   await retryFailedExchangeNotifies(pool);
 
   const opToken = await getOperatorToken(sdkConfig);
@@ -401,6 +434,15 @@ async function tick(pool: Pool): Promise<void> {
         log(`held: unknown sender for ${c.contractId.slice(0, 14)}… (${amount} ${INSTRUMENT_ID})`);
         unmatchedLogged.add(c.contractId);
       }
+      // Unattributable USDCx sitting in the vault — needs a human to trace.
+      await registerAlert(pool, {
+        type: 'deposit_stuck',
+        severity: 'warning',
+        dedupKey: `deposit_stuck:unknown_sender:${c.contractId}`,
+        title: 'Held deposit — unknown sender',
+        body: `${amount} ${INSTRUMENT_ID} landed in the vault but the sending party could not be resolved. Recorded in held_deposits; needs manual attribution.`,
+        context: { amount, instrument: INSTRUMENT_ID, holdingCid: c.contractId, transferUpdateId: dedupKey },
+      });
       seenHoldingCids.add(c.contractId);
       continue;
     }
@@ -421,6 +463,19 @@ async function tick(pool: Pool): Promise<void> {
         [amount, dedupKey, c.contractId, JSON.stringify({ sender, holdingCid: c.contractId })],
       );
       log(`held: unknown user ${sender.split('::')[0]}… for ${amount} ${INSTRUMENT_ID}`);
+      // Internal transfers (withdrawal change, treasury/bridge moves) land here
+      // too — the vault/operator/treasury aren't users. Only alert when the
+      // sender is a genuinely unrecognized external party.
+      if (!INTERNAL_PARTIES.has(sender)) {
+        await registerAlert(pool, {
+          type: 'deposit_stuck',
+          severity: 'warning',
+          dedupKey: `deposit_stuck:unknown_user:${c.contractId}`,
+          title: 'Held deposit — unknown user',
+          body: `${amount} ${INSTRUMENT_ID} sent to the vault by a party with no user record (${sender.split('::')[0]}…). Recorded in held_deposits; needs manual attribution or onboarding.`,
+          context: { amount, instrument: INSTRUMENT_ID, sender, holdingCid: c.contractId, transferUpdateId: dedupKey },
+        });
+      }
       seenHoldingCids.add(c.contractId);
       continue;
     }
@@ -564,12 +619,13 @@ async function tryNotifyAndRecord(
     log(`✓ exchange credited ${args.amount} ${args.coin} for ${args.partyId.split('::')[0]}…`);
   } else {
     const errSummary = JSON.stringify(result.body).slice(0, 500);
-    await pool.query(
+    const upd = await pool.query<{ exchange_attempts: number }>(
       `UPDATE deposits
           SET exchange_attempts        = exchange_attempts + 1,
               exchange_last_attempt_at = NOW(),
               exchange_last_error      = $2
-        WHERE transfer_update_id = $1`,
+        WHERE transfer_update_id = $1
+        RETURNING exchange_attempts`,
       [args.txRef, `${result.status}: ${errSummary}`],
     );
     await pool.query(
@@ -578,6 +634,22 @@ async function tryNotifyAndRecord(
       [args.partyId, JSON.stringify({ ...args, onChainSymbol: INSTRUMENT_SYMBOL, status: result.status, body: result.body })],
     );
     log(`⚠ exchange notify failed (${result.status}) for ${args.partyId.split('::')[0]}…: ${errSummary.slice(0, 200)}`);
+
+    // Once retries are exhausted the retry pass stops touching this row
+    // (it filters exchange_attempts < MAX) — so the deposit is credited
+    // on-chain but the user's tradeable balance will never update without
+    // intervention. Fire once at the exhaustion boundary.
+    const attempts = upd.rows[0]?.exchange_attempts ?? 0;
+    if (attempts >= MAX_EXCHANGE_ATTEMPTS) {
+      await registerAlert(pool, {
+        type: 'deposit_stuck',
+        severity: 'warning',
+        dedupKey: `deposit_stuck:exchange:${args.txRef}`,
+        title: 'Deposit stuck — exchange credit failed',
+        body: `On-chain deposit is credited but the exchange-backend notify failed ${attempts}× (max ${MAX_EXCHANGE_ATTEMPTS}). The user's tradeable balance is NOT updated. Last error: ${errSummary.slice(0, 300)}`,
+        context: { user: args.partyId, amount: args.amount, coin: args.coin, txRef: args.txRef, attempts, lastStatus: result.status },
+      });
+    }
   }
 }
 
