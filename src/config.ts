@@ -191,3 +191,34 @@ export const PORT = Number(process.env.PORT) || 3003;
 export const EXCHANGE_API_HEADER = process.env.EXCHANGE_API_HEADER || 'x-liminal-signature';
 export const EXCHANGE_API_SECRET = process.env.EXCHANGE_API_SECRET || '';
 
+// ─── Alerts / ops notifications ──────────────────────────────────────────
+// Operational alerts are delivered to a Telegram group (TELEGRAM_ALERTS_CHAT_ID
+// below). Alerts are decoupled: sources call registerAlert() (a cheap INSERT
+// into the `alerts` table); an always-on process (the deposit watcher, or a
+// dedicated monitor) drains pending rows to Telegram via runAlertProcessor().
+// The Lambda API only ever REGISTERS (it's short-lived); it never sends.
+// See src/alerts/*.
+// A sustained condition (e.g. reserve shortfall) alerts once, then stays
+// quiet until it resolves — but re-fires as a reminder after this cooldown
+// so an unresolved problem doesn't drop off the radar.
+export const ALERT_COOLDOWN_MINUTES = Number(process.env.ALERT_COOLDOWN_MINUTES ?? 30);
+// Delivery retry policy for the processor: how many times to attempt posting
+// a single alert to Telegram before marking it 'failed', and the minimum gap
+// between attempts on a given row.
+export const ALERT_MAX_SEND_ATTEMPTS = Number(process.env.ALERT_MAX_SEND_ATTEMPTS ?? 6);
+export const ALERT_SEND_BACKOFF_MS = Number(process.env.ALERT_SEND_BACKOFF_MS ?? 30_000);
+// Safety valve: never send more than this many alerts per processor pass, so
+// a burst (or a bug) can't rate-limit us out of the webhook.
+export const ALERT_SEND_BATCH_LIMIT = Number(process.env.ALERT_SEND_BATCH_LIMIT ?? 10);
+
+// ─── Telegram notifications ──────────────────────────────────────────────
+// Two INDEPENDENT bots + groups:
+//   • SUPPORT — user "Report an issue" submissions (src/api/support.ts)
+//   • ALERTS  — automated ops alerts (src/alerts/*)
+// Create each bot via @BotFather, add it to its group, and set the numeric
+// group chat id (negative for groups/supergroups — e.g. -1001234567890).
+export const TELEGRAM_SUPPORT_BOT_TOKEN = process.env.TELEGRAM_SUPPORT_BOT_TOKEN || '';
+export const TELEGRAM_SUPPORT_CHAT_ID = process.env.TELEGRAM_SUPPORT_CHAT_ID || '';
+export const TELEGRAM_ALERTS_BOT_TOKEN = process.env.TELEGRAM_ALERTS_BOT_TOKEN || '';
+export const TELEGRAM_ALERTS_CHAT_ID = process.env.TELEGRAM_ALERTS_CHAT_ID || '';
+

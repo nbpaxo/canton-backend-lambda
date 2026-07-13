@@ -22,6 +22,7 @@ import internalDepositRoutes from './api/internalDeposit.js';
 import userTransfersRoutes from './api/userTransfers.js';
 import withdrawRoutes from './api/withdraw.js';
 import withdrawalsRoutes from './api/withdrawals.js';
+import supportRoutes from './api/support.js';
 import { PORT, CORS_ORIGINS, KYC_PROVIDER } from './config.js';
 
 // ─── Cold-start banner ───────────────────────────────────────────────────
@@ -111,6 +112,7 @@ app.use('/', internalDepositRoutes);
 app.use('/', userTransfersRoutes);
 app.use('/', withdrawRoutes);
 app.use('/', withdrawalsRoutes);
+app.use('/', supportRoutes);
 
 // ─── 404 + error handlers (JSON, never HTML) ─────────────────────────────
 // Express's default handlers serve HTML, which trips up our frontend's

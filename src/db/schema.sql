@@ -80,6 +80,18 @@ CREATE TABLE IF NOT EXISTS watcher_checkpoint (
 INSERT INTO watcher_checkpoint (id) VALUES (1) ON CONFLICT DO NOTHING;
 
 
+-- ─── Worker heartbeats (liveness) ────────────────────────────────────────
+-- Each long-running worker (deposit watcher, health monitor, …) upserts its
+-- row every tick. The health monitor reads these and alerts when a worker's
+-- heartbeat goes stale (see WATCHER_HEARTBEAT_MINUTES). Distinct from
+-- watcher_checkpoint, whose updated_at only advances on new ledger activity.
+CREATE TABLE IF NOT EXISTS worker_heartbeats (
+  worker   TEXT PRIMARY KEY,
+  beat_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  meta     JSONB
+);
+
+
 -- ─── Deposits ────────────────────────────────────────────────────────────
 -- Mirrors on-chain DepositReceipt creation. Watcher inserts after gating
 -- on KYC; if the user isn't KYC-approved at the time the transfer lands,
@@ -268,6 +280,81 @@ BEGIN
       'exchange-api-fail','on-chain-failed'
     ));
 END $$;
+
+-- ─── Alerts (ops notifications → Telegram alerts group) ────────────────────
+-- Decoupled alert queue. Detection sites (withdraw path, deposit watcher,
+-- health monitor) call registerAlert() → one INSERT here. The always-on
+-- health-monitor process drains status='pending' rows to the Telegram group
+-- (runAlertProcessor). The Lambda API only ever registers; it never sends
+-- (it's short-lived).
+--
+-- Two orthogonal lifecycles per row:
+--   • delivery:  status pending → sent | failed   (did Telegram accept it?)
+--   • condition: resolved_at NULL → set           (did the underlying
+--                                                   problem clear?)
+-- dedup_key identifies a logical condition/event:
+--   • condition alerts use a STABLE key (e.g. 'reserve_shortfall') so a
+--     sustained breach fires once, then again only after the cooldown.
+--   • event alerts use a UNIQUE key (e.g. 'withdraw_failed:<approval>:<step>')
+--     so each distinct event fires exactly once.
+CREATE TABLE IF NOT EXISTS alerts (
+  id              BIGSERIAL PRIMARY KEY,
+  alert_type      TEXT NOT NULL,
+  severity        TEXT NOT NULL
+                    CHECK (severity IN ('critical','warning','info')),
+  dedup_key       TEXT NOT NULL,
+  title           TEXT NOT NULL,
+  body            TEXT NOT NULL,
+  context         JSONB,
+  status          TEXT NOT NULL DEFAULT 'pending'
+                    CHECK (status IN ('pending','sent','failed')),
+  attempts        INT NOT NULL DEFAULT 0,
+  last_error      TEXT,
+  last_attempt_at TIMESTAMPTZ,
+  resolved_at     TIMESTAMPTZ,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  sent_at         TIMESTAMPTZ
+);
+-- Fast lookup for the processor's send loop (oldest pending first).
+CREATE INDEX IF NOT EXISTS alerts_pending_idx
+  ON alerts (created_at) WHERE status = 'pending';
+-- Dedup / cooldown / recovery lookups by logical key (most recent first).
+CREATE INDEX IF NOT EXISTS alerts_dedup_idx
+  ON alerts (dedup_key, created_at DESC);
+-- Open (unresolved) condition alerts — used by resolveAlert() + dashboards.
+CREATE INDEX IF NOT EXISTS alerts_open_idx
+  ON alerts (dedup_key) WHERE resolved_at IS NULL;
+
+
+-- ─── Support reports (in-app "Report an issue") ──────────────────────────
+-- One row per user-submitted issue. Logged-in users only; party_id + user_type
+-- are derived server-side (never trusted from the client). The user supplies a
+-- description + at least one contact handle (telegram / twitter / email) so the
+-- team can reach them. On submit we also ping the support Telegram group
+-- (notified_telegram flips true on success).
+CREATE TABLE IF NOT EXISTS support_reports (
+  id                BIGSERIAL PRIMARY KEY,
+  user_party_id     TEXT NOT NULL,
+  user_type         TEXT NOT NULL,          -- 'validator' | 'loop'
+  description       TEXT NOT NULL,
+  telegram          TEXT,
+  twitter           TEXT,
+  email             TEXT,
+  status            TEXT NOT NULL DEFAULT 'open'
+                      CHECK (status IN ('open','in_progress','resolved','closed')),
+  notified_telegram BOOLEAN NOT NULL DEFAULT false,
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  resolved_at       TIMESTAMPTZ,
+  resolution_note   TEXT,
+  -- At least one contact must be present.
+  CONSTRAINT support_reports_contact_chk
+    CHECK (telegram IS NOT NULL OR twitter IS NOT NULL OR email IS NOT NULL)
+);
+CREATE INDEX IF NOT EXISTS support_reports_open_idx
+  ON support_reports (created_at DESC) WHERE status = 'open';
+CREATE INDEX IF NOT EXISTS support_reports_user_idx
+  ON support_reports (user_party_id, created_at DESC);
+
 
 -- ─── Audit log ───────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS audit_log (
