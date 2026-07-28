@@ -235,15 +235,25 @@ router.post('/signup', async (req: Request, res: Response) => {
     // 8. Upsert into our local users table so /me + the watcher find them.
     //    We store email so future server-side lookups (if we ever add
     //    `x-user-email` resolution) don't need to re-derive the hint.
-    await getPool().query(
-      `INSERT INTO users (party_id, is_external, keycloak_sub, username, email)
-         VALUES ($1, false, $2, $3, $4)
-       ON CONFLICT (party_id) DO UPDATE
-         SET keycloak_sub = EXCLUDED.keycloak_sub,
-             username     = EXCLUDED.username,
-             email        = EXCLUDED.email`,
-      [partyId, kcUuid, username, email],
-    );
+    try {
+      await getPool().query(
+        `INSERT INTO users (party_id, is_external, keycloak_sub, username, email)
+           VALUES ($1, false, $2, $3, $4)
+         ON CONFLICT (party_id) DO UPDATE
+           SET keycloak_sub = EXCLUDED.keycloak_sub,
+               username     = EXCLUDED.username,
+               email        = EXCLUDED.email`,
+        [partyId, kcUuid, username, email],
+      );
+    } catch (e) {
+      // System-wide email uniqueness backstop (23505). Keycloak already rejects
+      // duplicate emails at step 2, so this is a rare race; surface it cleanly.
+      if ((e as { code?: string }).code === '23505') {
+        res.status(409).json({ error: 'An account with that email already exists.' });
+        return;
+      }
+      throw e;
+    }
 
     // 9. (deferred) VaultAccountProposal — the new operator-only-signed
     //    contract may not need it. Re-enable here once the new Daml package

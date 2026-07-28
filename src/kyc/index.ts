@@ -8,11 +8,13 @@
 import { KYC_PROVIDER } from '../config.js';
 import { personaProvider } from './persona.js';
 import { sumsubProvider } from './sumsub.js';
+import { hypersignProvider } from './hypersign.js';
 import type { KycProvider } from './types.js';
 
 const PROVIDERS: Record<string, KycProvider> = {
   persona: personaProvider,
   sumsub: sumsubProvider,
+  hypersign: hypersignProvider,
 };
 
 /** Look up a provider by name (for the per-provider webhook routes). */
@@ -31,5 +33,5 @@ export function getActiveProvider(): KycProvider {
   return p;
 }
 
-export { personaProvider, sumsubProvider };
+export { personaProvider, sumsubProvider, hypersignProvider };
 export * from './types.js';

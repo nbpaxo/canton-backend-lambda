@@ -165,6 +165,7 @@ if (process.env.AWS_LAMBDA_FUNCTION_NAME === undefined) {
     console.log(`  POST /kyc/start             — start KYC (active provider: ${KYC_PROVIDER})`);
     console.log('  POST /kyc/webhook/persona   — Persona event sink (HMAC verified)');
     console.log('  POST /kyc/webhook/sumsub    — Sumsub event sink (x-payload-digest)');
+    console.log('  POST /kyc/webhook/hypersign — Hypersign event sink ({ idToken, sessionId })');
     console.log('  GET  /admin/invite-codes    — admin (x-api-key)');
   });
 }

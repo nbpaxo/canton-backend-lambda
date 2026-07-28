@@ -9,18 +9,21 @@
  * branching.
  *
  * Column mapping in `kyc_inquiries` (generic):
- *   provider      → 'persona' | 'sumsub'
+ *   provider      → 'persona' | 'sumsub' | 'hypersign'
  *   inquiry_id    → the provider's primary record id
- *                   (Persona inquiry id `inq_…` / Sumsub applicantId)
+ *                   (Persona inquiry id `inq_…` / Sumsub applicantId /
+ *                    Hypersign KYC sessionId)
  *   reference_id  → our Canton party id
- *                   (Persona `reference-id` / Sumsub `externalUserId`)
+ *                   (Persona `reference-id` / Sumsub `externalUserId`;
+ *                    Hypersign's webhook omits it, so we resolve it from the
+ *                    stored sessionId at webhook time)
  *   template_id   → the verification template/level
- *                   (Persona inquiry-template / Sumsub levelName)
+ *                   (Persona inquiry-template / Sumsub levelName; Hypersign n/a)
  *   status        → normalized KycStatus
  *   decision      → normalized KycDecision
  */
 
-export type KycProviderName = 'persona' | 'sumsub';
+export type KycProviderName = 'persona' | 'sumsub' | 'hypersign';
 
 /** Normalized lifecycle status (what `kyc_inquiries.status` holds). */
 export type KycStatus =
@@ -95,6 +98,15 @@ export interface KycProvider {
   readonly name: KycProviderName;
 
   /**
+   * When true, an email MUST be on file for EVERY user before /kyc/start will
+   * begin verification (the provider needs it up front and cannot collect it
+   * in-flow). Hypersign's client_auth flow sets this (email is a mandatory
+   * DID-JWT claim). Persona/Sumsub leave it unset — they collect/verify the
+   * email inside their own hosted flow for users we don't already have one for.
+   */
+  readonly requiresEmail?: boolean;
+
+  /**
    * Start or resume verification for `userParty`.
    *   - `existingInquiryId` is passed when the user's latest record is in a
    *     resumable state; providers that support resume reuse it, others
@@ -124,4 +136,38 @@ export interface KycProvider {
    * back into our DB. Optional — providers that don't expose it omit it.
    */
   fetchContactEmail?(inquiryId: string): Promise<string | null>;
+
+  /**
+   * Webhook fallback: poll the provider for a record's current consent/verification
+   * state in ONE call. Returns:
+   *   - `done: true`  + `event` (normalized outcome to persist) when finished, or
+   *   - `done: false` + `steps` (progress taken so far) when still in progress.
+   * Returns null if the provider doesn't support polling or the poll failed.
+   * Used by /kyc/sync (reconcile on Refresh) and /kyc/progress (progress modal).
+   * `referenceId` is our party id (echoed back for providers whose poll response
+   * omits it).
+   */
+  getConsentStatus?(inquiryId: string, referenceId: string): Promise<KycConsentStatus | null>;
+}
+
+/** One step in a provider's in-progress verification (for the progress modal). */
+export interface KycProgressStep {
+  stepName: string;
+  /** 'success' | 'fail' (provider-specific). */
+  status: string;
+  /** Provider error code on a failed step (present only when status = fail). */
+  errorCode?: number | null;
+  /** Human-readable error message on a failed step. */
+  error?: string | null;
+  createdAt?: string | null;
+}
+
+/** Result of polling a provider's consent/verification state. */
+export interface KycConsentStatus {
+  /** True when verification finished — `event` carries the outcome to persist. */
+  done: boolean;
+  /** The normalized outcome when done (else null). */
+  event: NormalizedKycEvent | null;
+  /** Steps taken so far when still in progress (else empty). */
+  steps: KycProgressStep[];
 }

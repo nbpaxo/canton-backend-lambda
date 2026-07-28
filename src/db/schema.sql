@@ -23,6 +23,46 @@ CREATE TABLE IF NOT EXISTS users (
 );
 CREATE INDEX IF NOT EXISTS users_keycloak_sub_idx
   ON users (keycloak_sub) WHERE keycloak_sub IS NOT NULL;
+-- System-wide, case-insensitive email uniqueness. A partial UNIQUE index (NULLs
+-- excluded, so users without an email are unaffected) enforces "one account per
+-- email" at the DB level — the backstop behind every write path
+-- (signup, KYC email OTP, Keycloak backfill, webhook capture). This index also
+-- serves the case-insensitive lookups those paths run.
+--
+-- Guarded creation: if legacy duplicate emails already exist the unique index
+-- can't be built, so we warn instead of failing the whole schema apply. Resolve
+-- the duplicates, then re-run db:apply to create it.
+DROP INDEX IF EXISTS users_email_lower_idx;  -- superseded by the unique index
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM users
+     WHERE email IS NOT NULL
+     GROUP BY LOWER(email)
+    HAVING COUNT(*) > 1
+  ) THEN
+    RAISE WARNING 'users_email_lower_uidx NOT created: duplicate emails exist. Resolve duplicates, then re-run db:apply.';
+  ELSE
+    CREATE UNIQUE INDEX IF NOT EXISTS users_email_lower_uidx
+      ON users (LOWER(email)) WHERE email IS NOT NULL;
+  END IF;
+END $$;
+
+
+-- ─── Email OTP (KYC email collection) ────────────────────────────────────
+-- One in-flight verification code per user. Requesting a new code overwrites
+-- the row (ON CONFLICT party_id). The code is stored HASHED (never plaintext).
+-- Rows are ephemeral: deleted on successful verify; stale rows are harmless
+-- (expires_at gates them). Used by POST /kyc/email/request-otp + verify-otp.
+CREATE TABLE IF NOT EXISTS email_otps (
+  party_id     TEXT PRIMARY KEY REFERENCES users(party_id),
+  email        TEXT NOT NULL,             -- address the code was sent to (lowercased)
+  code_hash    TEXT NOT NULL,             -- sha256(code) hex
+  expires_at   TIMESTAMPTZ NOT NULL,
+  attempts     INT NOT NULL DEFAULT 0,    -- failed verify attempts (capped)
+  last_sent_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
 
 
 -- ─── Invite codes (moved from DynamoDB) ──────────────────────────────────
@@ -44,13 +84,13 @@ CREATE INDEX IF NOT EXISTS invite_codes_unredeemed_idx
 -- current state is `status`. We never delete — full lifecycle audit lives
 -- here for compliance.
 -- Provider-agnostic KYC records. One row per provider verification record.
--- See src/kyc/types.ts for the generic column mapping (Persona / Sumsub).
+-- See src/kyc/types.ts for the generic column mapping (Persona / Sumsub / Hypersign).
 CREATE TABLE IF NOT EXISTS kyc_inquiries (
-  inquiry_id      TEXT PRIMARY KEY,        -- provider primary id: Persona inquiry (inq_…) / Sumsub applicantId
+  inquiry_id      TEXT PRIMARY KEY,        -- provider primary id: Persona inquiry (inq_…) / Sumsub applicantId / Hypersign sessionId
   user_party_id   TEXT NOT NULL REFERENCES users(party_id),
-  provider        TEXT NOT NULL DEFAULT 'persona', -- 'persona' | 'sumsub'
+  provider        TEXT NOT NULL DEFAULT 'persona', -- 'persona' | 'sumsub' | 'hypersign'
   template_id     TEXT,                    -- verification template/level: Persona template (itmpl_…) / Sumsub levelName
-  reference_id    TEXT,                    -- our party id echoed back (Persona reference-id / Sumsub externalUserId)
+  reference_id    TEXT,                    -- our party id echoed back (Persona reference-id / Sumsub externalUserId; resolved from sessionId for Hypersign)
   status          TEXT NOT NULL,           -- created | pending | completed | approved | declined | needs_review | expired | failed | redacted
   decision        TEXT,                    -- approved | declined | needs_review | null
   reject_reason    TEXT,                   -- human-readable reason on a rejection (Sumsub moderation/client comment)

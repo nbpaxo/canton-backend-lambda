@@ -177,6 +177,72 @@ export const SUMSUB_REDIRECT_URI = process.env.SUMSUB_REDIRECT_URI || PERSONA_RE
 // for the decision (the webhook is the source of truth), so it's off unless set.
 export const SUMSUB_REDIRECT_SIGN_KEY = process.env.SUMSUB_REDIRECT_SIGN_KEY || '';
 
+// ─── Hypersign (KYC — "Cavach") ─────────────────────────────────────────
+// Flow (see src/kyc/hypersign.ts):
+//   1. Mint a short-lived KYC access token by exchanging the app's API secret
+//      key at the OAuth endpoint, selecting the service via grant_type:
+//        POST {AUTH_API_BASE}/api/v1/app/oauth?grant_type=access_service_kyc
+//        header: X-Api-Secret-Key: <secret>   → { access_token, expiresIn }
+//      A matching ssiAccessToken (grant_type=access_service_ssi) is minted
+//      best-effort with the same secret; the widget works without it.
+//   2. Create a verification session at the KYC tenant URL:
+//        POST {KYC_TENANT_URL}/api/v2/session
+//        header: x-kyc-access-token: <kycAccessToken>   → { data: { sessionId } }
+//   3. The user opens the hosted widget:
+//        {WIDGET_URL}?kycAccessToken=…&ssiAccessToken=…&sessionId=…
+// On completion Hypersign POSTs a webhook `{ idToken, sessionId }` (the idToken
+// is a signed JWT; the body has NO reference/externalUserId, so we route the
+// event to a party via the sessionId we stored at /kyc/start).
+// docs: https://docs.hypersign.id/hypersign-kyc
+//
+// A single app "API secret key" (from the Cavach/Entity dashboard) is all you
+// need; the dashboard "application id" is NOT used by any API call here.
+export const HYPERSIGN_API_SECRET_KEY = process.env.HYPERSIGN_API_SECRET_KEY || '';
+// Secret used for the SSI grant. Most Cavach setups reuse the same app secret,
+// so default to it; override only if your account has a distinct SSI secret.
+export const HYPERSIGN_SSI_API_SECRET_KEY =
+  process.env.HYPERSIGN_SSI_API_SECRET_KEY || '';
+// OAuth endpoint base that exchanges a secret key for an access token.
+export const HYPERSIGN_AUTH_API_BASE =
+  process.env.HYPERSIGN_AUTH_API_BASE || 'https://api.entity.dashboard.hypersign.id';
+// The KYC "tenant URL" from your Cavach dashboard, where sessions are created.
+// No trailing slash. (Yours: https://api.cavach.hypersign.id)
+export const HYPERSIGN_KYC_TENANT_URL = (
+  process.env.HYPERSIGN_KYC_TENANT_URL || 'https://api.cavach.hypersign.id'
+).replace(/\/$/, '');
+// Hosted verification widget origin the frontend opens (with the token + sessionId).
+export const HYPERSIGN_WIDGET_URL = process.env.HYPERSIGN_WIDGET_URL || 'https://verify.hypersign.id';
+// Client-auth user token (kycUserAccessToken). REQUIRED once in-widget user
+// login (e.g. Google) is DISABLED: with no in-widget login the backend must
+// establish the user session itself, so /kyc/start mints a per-session
+// kycUserAccessToken via a 3-step flow (create user DID → issue DID-signed JWT
+// → exchange) and appends it to the widget URL. See src/kyc/hypersign.ts.
+//   • SSI_BASE_URL is the SSI *entity* service (NOT the dashboard oauth host and
+//     NOT the cavach KYC tenant); it serves /api/v1/did/*.
+//   • ISSUER_DID + ISSUER_VERIFICATION_METHOD_ID are your app's issuer identity
+//     from the SSI sub-portal (key type Ed25519VerificationKey2020).
+// The flow activates only when ISSUER_DID + ISSUER_VERIFICATION_METHOD_ID are
+// both set; otherwise /kyc/start falls back to the admin-token-only widget URL
+// (which is valid only while in-widget login is still enabled).
+export const HYPERSIGN_SSI_BASE_URL = (
+  process.env.HYPERSIGN_SSI_BASE_URL || 'https://api.entity.hypersign.id'
+).replace(/\/$/, '');
+export const HYPERSIGN_ISSUER_DID = process.env.HYPERSIGN_ISSUER_DID || '';
+export const HYPERSIGN_ISSUER_VERIFICATION_METHOD_ID =
+  process.env.HYPERSIGN_ISSUER_VERIFICATION_METHOD_ID || '';
+// Webhook auth: the Cavach webhook config lets you set a custom header that
+// Hypersign sends on every webhook POST. Put a strong random value in the
+// dashboard's `x-api-token` field and the SAME value here — incoming webhooks
+// whose `x-api-token` header doesn't match are rejected. This is the primary
+// authenticity guard (Hypersign's webhook body has no documented signature).
+export const HYPERSIGN_WEBHOOK_API_TOKEN = process.env.HYPERSIGN_WEBHOOK_API_TOKEN || '';
+// Optional additional guard: when set, we also verify the webhook idToken's
+// HS256 signature against it. If neither this nor HYPERSIGN_WEBHOOK_API_TOKEN
+// is set, we fall back to accepting a structurally-valid idToken whose
+// sessionId maps to a verification we created (the sessionId→party mapping is
+// then the only guard).
+export const HYPERSIGN_WEBHOOK_SECRET = process.env.HYPERSIGN_WEBHOOK_SECRET || '';
+
 // Postgres (devnet branch — replaces DynamoDB for invite codes / users / KYC).
 // Defaults match the docker-compose service.
 export const DATABASE_URL =
@@ -221,4 +287,22 @@ export const TELEGRAM_SUPPORT_BOT_TOKEN = process.env.TELEGRAM_SUPPORT_BOT_TOKEN
 export const TELEGRAM_SUPPORT_CHAT_ID = process.env.TELEGRAM_SUPPORT_CHAT_ID || '';
 export const TELEGRAM_ALERTS_BOT_TOKEN = process.env.TELEGRAM_ALERTS_BOT_TOKEN || '';
 export const TELEGRAM_ALERTS_CHAT_ID = process.env.TELEGRAM_ALERTS_CHAT_ID || '';
+
+// ─── Resend (transactional email — KYC email OTP) ───────────────────────
+// Used to send the 6-digit email-verification code for users whose email we
+// don't already have (Loop wallet users) before the Hypersign client_auth
+// flow, which needs a verified email up front. Create an API key at
+// resend.com, verify the sending domain (DNS), and set RESEND_FROM to a
+// verified sender on it.
+export const RESEND_API_KEY = process.env.RESEND_API_KEY || '';
+export const RESEND_API_BASE = process.env.RESEND_API_BASE || 'https://api.resend.com';
+export const RESEND_FROM = process.env.RESEND_FROM || 'Mperps <no-reply@mperps.xyz>';
+
+// Email OTP tuning.
+export const EMAIL_OTP_TTL_SECS = Number(process.env.EMAIL_OTP_TTL_SECS || '600'); // 10 min
+export const EMAIL_OTP_MAX_ATTEMPTS = Number(process.env.EMAIL_OTP_MAX_ATTEMPTS || '5');
+// Minimum gap between successive code requests for one user (anti-spam).
+export const EMAIL_OTP_RESEND_COOLDOWN_SECS = Number(
+  process.env.EMAIL_OTP_RESEND_COOLDOWN_SECS || '30',
+);
 

@@ -24,11 +24,13 @@ import {
   INSTRUMENT_SYMBOL,
   PARTIES,
 } from '../config.js';
+import { getActiveProvider } from '../kyc/index.js';
 
 const router = Router();
 
 interface KycRow {
   inquiry_id: string;
+  provider: string;
   status: string;
   decision: string | null;
   reject_reason: string | null;
@@ -52,10 +54,20 @@ router.get('/me', requireAuth, async (req: Request, res: Response) => {
     [party, !sub, sub || null],
   );
 
+  // Whether an email is on file (boolean only — the address itself is PII and
+  // stays omitted). Lets the UI show the email-collection step before KYC for
+  // providers that require an email up front (Hypersign).
+  const hasEmail = (
+    await pool.query<{ has_email: boolean }>(
+      `SELECT (email IS NOT NULL AND email <> '') AS has_email FROM users WHERE party_id = $1`,
+      [party],
+    )
+  ).rows[0]?.has_email ?? false;
+
   // Latest KYC inquiry, if any.
   const kycRow = (
     await pool.query<KycRow>(
-      `SELECT inquiry_id, status, decision, reject_reason, resubmit_allowed, updated_at, completed_at
+      `SELECT inquiry_id, provider, status, decision, reject_reason, resubmit_allowed, updated_at, completed_at
          FROM kyc_inquiries
         WHERE user_party_id = $1
         ORDER BY created_at DESC
@@ -67,6 +79,7 @@ router.get('/me', requireAuth, async (req: Request, res: Response) => {
   const kyc = kycRow
     ? {
         inquiryId: kycRow.inquiry_id,
+        provider: kycRow.provider,
         status: kycRow.status,
         decision: kycRow.decision,
         rejectReason: kycRow.reject_reason,
@@ -76,6 +89,7 @@ router.get('/me', requireAuth, async (req: Request, res: Response) => {
       }
     : {
         inquiryId: null,
+        provider: null,
         status: 'not_started',
         decision: null,
         rejectReason: null,
@@ -84,8 +98,19 @@ router.get('/me', requireAuth, async (req: Request, res: Response) => {
         completedAt: null,
       };
 
+  // Whether the ACTIVE KYC provider needs an email up front (Hypersign). The
+  // UI shows the email-collection step only when emailRequired && !hasEmail.
+  let emailRequired = false;
+  try {
+    emailRequired = getActiveProvider().requiresEmail === true;
+  } catch {
+    emailRequired = false;
+  }
+
   res.json({
     partyId: party,
+    hasEmail,
+    emailRequired,
     kyc,
     instrument: {
       id: INSTRUMENT_ID,
