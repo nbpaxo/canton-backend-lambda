@@ -9,6 +9,9 @@
  *   2. Reserve the approval id in `withdrawals` table (replay guard).
  *   3. Look up the approval at exchange-backend (STUBBED; trusts client
  *      hints for now). Compare authenticated party to approval party.
+ *   3b. KYC gate — the party's latest kyc_inquiries.decision must be
+ *      'approved' (same for Loop + mperps). Deposits are NOT gated; only
+ *      withdrawals. Not-approved → 403 kyc_required.
  *   4. POST /v1/withdraw/defi (exchange-backend finalize). If this fails,
  *      DO NOT touch the chain — abort with 502. If it succeeds, balance
  *      has already been debited at exchange-backend.
@@ -17,7 +20,8 @@
  *
  * Failure modes:
  *   - 401 — auth missing/invalid
- *   - 403 — authenticated party doesn't match approval party
+ *   - 403 — authenticated party doesn't match approval party, OR
+ *           kyc_required (party's KYC decision is not 'approved')
  *   - 409 — approval id already used (replay)
  *   - 410 — approval expired / already finalized
  *   - 502 — exchange-backend finalize rejected
@@ -192,6 +196,31 @@ router.post('/withdraw', json(), async (req: Request, res: Response) => {
     return res.status(403).json({
       error: 'authenticated party does not match approval',
       details: { authParty: auth.partyId, approvalParty: approval.partyId },
+    });
+  }
+
+  // 3b. KYC gate — withdrawals require an APPROVED KYC decision. Identical
+  //     check for Loop and mperps users (kyc_inquiries is keyed purely by
+  //     party id). This is the server-side source of truth and cannot be
+  //     bypassed by the UI. Deposits are NOT gated (see depositWatcher.ts) —
+  //     only withdrawals. A not-approved result is an expected user-facing
+  //     rejection (not an ops incident), so we return 403 without recording
+  //     a failed_withdraw_attempt / firing an alert.
+  const kycRow = (
+    await pool.query<{ decision: string | null }>(
+      `SELECT decision FROM kyc_inquiries
+        WHERE user_party_id = $1
+        ORDER BY created_at DESC LIMIT 1`,
+      [approval.partyId],
+    )
+  ).rows[0];
+  if (kycRow?.decision !== 'approved') {
+    wlog('kyc_blocked', { decision: kycRow?.decision ?? 'not_started' });
+    return res.status(403).json({
+      error: 'kyc_required',
+      message:
+        'Identity verification (KYC) must be approved before you can withdraw.',
+      kycDecision: kycRow?.decision ?? 'not_started',
     });
   }
 

@@ -6,11 +6,13 @@
  * `TransferFactory_Transfer` exercise to find the depositing party. Then:
  *
  *   • If we don't know the depositor → row in held_deposits (unknown_user).
- *   • If the depositor exists but KYC is not approved → held_deposits
- *     (reason='kyc_not_done').
- *   • If KYC approved → create #exchange-v2-core:Vault:DepositRecord
- *     on chain (operator-signed), record the receipt cid + transfer
- *     update_id in `deposits`.
+ *   • If the depositor is a known user → create
+ *     #exchange-v2-core:Vault:DepositRecord on chain (operator-signed),
+ *     record the receipt cid + transfer update_id in `deposits`.
+ *
+ * NOTE: the KYC gate on deposits is DISABLED — any known user is credited.
+ * KYC is enforced on WITHDRAW instead (src/api/withdraw.ts). The old
+ * kyc_not_done held_deposits branch is kept commented out below.
  *
  * Dedup: we use the transfer's `update_id` as the unique key (one transfer
  * → one Holding → one DepositRecord). Stored in deposits.transfer_update_id
@@ -239,7 +241,8 @@ async function backfillSourceHoldingCids(pool: Pool): Promise<void> {
  *  2. Filter to Amulet/CC + unlocked + not-yet-seen.
  *  3. For each, resolve the originating transfer's update_id + sender
  *     party from the on-chain tx tree.
- *  4. Branch on KYC status; create DepositRecord or write to held_deposits.
+ *  4. Branch on known-user status; create DepositRecord or write to
+ *     held_deposits (unknown_user). KYC is NOT checked here anymore.
  *  5. Persist the new ledger end so the next tick only sees deltas.
  */
 async function tick(pool: Pool): Promise<void> {
@@ -447,7 +450,7 @@ async function tick(pool: Pool): Promise<void> {
       continue;
     }
 
-    // Look up user + KYC status.
+    // Look up the user (known-user gate). KYC is no longer checked here.
     const userRow = (
       await pool.query<{ party_id: string }>(
         `SELECT party_id FROM users WHERE party_id = $1`,
@@ -480,28 +483,34 @@ async function tick(pool: Pool): Promise<void> {
       continue;
     }
 
-    const kycRow = (
-      await pool.query<{ decision: string | null }>(
-        `SELECT decision FROM kyc_inquiries
-          WHERE user_party_id = $1
-          ORDER BY created_at DESC LIMIT 1`,
-        [sender],
-      )
-    ).rows[0];
+    // ── KYC gate DISABLED for deposits ───────────────────────────────────
+    // Deposits are now credited for any known ("with us") user — the
+    // users-table check above is the only gate. KYC is enforced on WITHDRAW
+    // instead (see src/api/withdraw.ts). The previous KYC gate is kept below,
+    // commented out, so it can be restored if the policy changes.
+    //
+    // const kycRow = (
+    //   await pool.query<{ decision: string | null }>(
+    //     `SELECT decision FROM kyc_inquiries
+    //       WHERE user_party_id = $1
+    //       ORDER BY created_at DESC LIMIT 1`,
+    //     [sender],
+    //   )
+    // ).rows[0];
+    //
+    // if (kycRow?.decision !== 'approved') {
+    //   await pool.query(
+    //     `INSERT INTO held_deposits (user_party_id, amount, transfer_update_id, source_holding_cid, reason, raw_meta)
+    //        VALUES ($1, $2, $3, $4, 'kyc_not_done', $5::jsonb)
+    //      ON CONFLICT (transfer_update_id) DO NOTHING`,
+    //     [sender, amount, dedupKey, c.contractId, JSON.stringify({ kycDecision: kycRow?.decision ?? 'not_started', holdingCid: c.contractId })],
+    //   );
+    //   log(`held: kyc not approved for ${sender.split('::')[0]}… (${amount} ${INSTRUMENT_ID}, decision=${kycRow?.decision ?? 'not_started'})`);
+    //   seenHoldingCids.add(c.contractId);
+    //   continue;
+    // }
 
-    if (kycRow?.decision !== 'approved') {
-      await pool.query(
-        `INSERT INTO held_deposits (user_party_id, amount, transfer_update_id, source_holding_cid, reason, raw_meta)
-           VALUES ($1, $2, $3, $4, 'kyc_not_done', $5::jsonb)
-         ON CONFLICT (transfer_update_id) DO NOTHING`,
-        [sender, amount, dedupKey, c.contractId, JSON.stringify({ kycDecision: kycRow?.decision ?? 'not_started', holdingCid: c.contractId })],
-      );
-      log(`held: kyc not approved for ${sender.split('::')[0]}… (${amount} ${INSTRUMENT_ID}, decision=${kycRow?.decision ?? 'not_started'})`);
-      seenHoldingCids.add(c.contractId);
-      continue;
-    }
-
-    // KYC approved — create DepositRecord on chain + insert deposits row.
+    // Known user — create DepositRecord on chain + insert deposits row.
     try {
       const result = await submitCommand(sdkConfig, opToken, opUserId, [PARTIES.operator], [
         {
