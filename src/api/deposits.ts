@@ -7,8 +7,8 @@
  *                       credited (KYC not done, unknown user, pre-existing
  *                       cutoff, etc.). Useful for end-user troubleshooting.
  *
- * Open-auth (AUTH_MODE=open) like /me — caller-supplied x-party-id is the
- * filter; we only return rows for that party.
+ * Authenticated like /me — the party comes from the verified credential and
+ * is the filter; we only return rows for that party.
  *
  * Each deposit carries its reconciliation state with the exchange backend
  * (credited / pending / failed) so the UI can show a clear progress chip

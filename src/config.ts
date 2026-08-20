@@ -249,7 +249,11 @@ export const DATABASE_URL =
   process.env.DATABASE_URL || 'postgres://canton_backend:canton_backend@localhost:5436/canton_backend';
 
 // Admin API key (for admin endpoints like invite code management)
-export const ADMIN_API_KEY = process.env.ADMIN_API_KEY || 'canton-admin-secret';
+// No default. The previous fallback ('canton-admin-secret') is committed to
+// this repo, so any deploy that forgot the env var was protected by a value
+// anyone with read access already knows. Empty means the admin routes reject
+// every request — see the guard in signup.ts.
+export const ADMIN_API_KEY = process.env.ADMIN_API_KEY || '';
 
 // Server port (for local dev; Lambda ignores this)
 export const PORT = Number(process.env.PORT) || 3003;
@@ -306,3 +310,24 @@ export const EMAIL_OTP_RESEND_COOLDOWN_SECS = Number(
   process.env.EMAIL_OTP_RESEND_COOLDOWN_SECS || '30',
 );
 
+
+// ─── Session auth ────────────────────────────────────────────────────────
+/**
+ * Age limit for a Loop signature on ordinary reads. Unbounded by default.
+ *
+ * The credential is the exchange login signature, which covers only the bare
+ * nonce and so carries no timestamp to measure age against. Rather than
+ * pretend to enforce a window we cannot verify, reads accept the credential
+ * for as long as the client holds it, and money-moving calls demand their own
+ * fresh signature instead (LOOP_WITHDRAW_TTL_MS, and the `mperp-withdraw-v1`
+ * envelope in withdrawAuth.ts, which does carry issuedAt).
+ *
+ * Set LOOP_CRED_TTL_SEC to impose a window — only meaningful once the signed
+ * payload carries an issuedAt.
+ */
+export const LOOP_CRED_TTL_MS = process.env.LOOP_CRED_TTL_SEC
+  ? Number(process.env.LOOP_CRED_TTL_SEC) * 1000
+  : Number.POSITIVE_INFINITY;
+
+/** Freshness demanded for money-moving calls — /withdraw re-signs every time. */
+export const LOOP_WITHDRAW_TTL_MS = Number(process.env.LOOP_WITHDRAW_TTL_SEC ?? 300) * 1000;

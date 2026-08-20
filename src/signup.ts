@@ -19,6 +19,7 @@
  */
 
 import { Router, Request, Response } from 'express';
+import { timingSafeEqual } from 'node:crypto';
 import { getAdminToken } from './auth.js';
 import { getInviteCode, redeemInviteCode, listInviteCodes, type RedeemedByInfo } from './db.js';
 import { getPool } from './db/pool.js';
@@ -314,11 +315,28 @@ async function grantRight(
   }
 }
 
+
+/** Constant-time string compare — a plain `!==` leaks the key byte by byte. */
+function safeEqualStr(a: string, b: string): boolean {
+  const ab = Buffer.from(a, 'utf8');
+  const bb = Buffer.from(b, 'utf8');
+  if (ab.length !== bb.length) return false;
+  return timingSafeEqual(ab, bb);
+}
+
 // ─── Admin: List invite codes ───────────────────────────────────────────────
 
 router.get('/admin/invite-codes', (req: Request, res: Response, next) => {
-  const key = req.headers['x-api-key'];
-  if (key !== ADMIN_API_KEY) {
+  // Fail closed: an unset ADMIN_API_KEY disables the route rather than
+  // matching the empty string a caller could trivially send.
+  if (!ADMIN_API_KEY) {
+    console.warn('[admin] ADMIN_API_KEY not set — refusing admin request');
+    res.status(503).json({ error: 'admin API not configured' });
+    return;
+  }
+  const raw = req.headers['x-api-key'];
+  const key = Array.isArray(raw) ? raw[0] : raw;
+  if (!key || !safeEqualStr(key, ADMIN_API_KEY)) {
     res.status(401).json({ error: 'Invalid API key' });
     return;
   }

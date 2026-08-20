@@ -44,6 +44,7 @@ import {
   WALLET_API_URL,
   BRIDGE_OPERATOR_PARTY_ID,
   UTILITY_OPERATOR_PARTY_ID,
+  PARTICIPANT_SUFFIX,
   formatInstrumentAmount,
 } from '../config.js';
 
@@ -268,9 +269,9 @@ function requireUserAuth(req: Request, res: Response, next: () => void): void {
   }
   const userToken = authHeader.slice(7);
 
-  const rawParty =
-    (req.headers['x-party-id'] as string | undefined) ??
-    (typeof req.query.partyId === 'string' ? req.query.partyId : undefined);
+  // Header only. `?partyId=` used to be accepted too, but query strings are
+  // copied into access logs, proxy logs and browser history.
+  const rawParty = req.headers['x-party-id'] as string | undefined;
   if (!rawParty) {
     res.status(401).json({ error: 'Missing x-party-id header' });
     return;
@@ -280,6 +281,29 @@ function requireUserAuth(req: Request, res: Response, next: () => void): void {
   const userId = extractJwtSub(userToken);
   if (!userId) {
     res.status(401).json({ error: 'Could not extract sub claim from Bearer token' });
+    return;
+  }
+
+  // Tie the claimed party to the token. Signup allocates the party with
+  // partyIdHint = sub, so the canonical party for a Keycloak caller is
+  // `sub::PARTICIPANT_SUFFIX`. Without this the header alone decided who the
+  // caller was, and it is attacker-controlled. Note the token's signature is
+  // verified by Canton on submit, not here — so this check is what stops a
+  // caller acting as a party that is not theirs.
+  const expectedParty = `${userId}::${PARTICIPANT_SUFFIX}`;
+  if (userParty !== expectedParty) {
+    // eslint-disable-next-line no-console
+    console.warn(JSON.stringify({
+      level: 'warn',
+      type: 'party_mismatch',
+      path: req.path,
+      tokenParty: expectedParty,
+      claimedParty: userParty,
+    }));
+    res.status(403).json({
+      error: 'party_mismatch',
+      message: 'x-party-id does not match the party for this token',
+    });
     return;
   }
 

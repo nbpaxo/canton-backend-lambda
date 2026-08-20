@@ -35,6 +35,7 @@ import {
   OPERATOR_KC_PASSWORD,
   PACKAGE_ID,
   PARTIES,
+  PARTICIPANT_SUFFIX,
 } from '../config.js';
 import { normalizePartyId } from '../auth.js';
 import type { CantonSdkConfig } from '../canton-sdk/config.js';
@@ -84,6 +85,41 @@ interface InternalDepositBody {
   memo?: Record<string, string>;
 }
 
+
+/**
+ * Tie a caller-supplied party to the Bearer token that accompanied it.
+ *
+ * The token's signature is verified by Canton when we submit, not here, so
+ * on its own it proves nothing to us — and `sender` arrives in the request.
+ * Without this check the two are unrelated values and the party is simply
+ * whatever the caller typed. Signup allocates parties with partyIdHint = sub,
+ * so a Keycloak caller's party is always `sub::PARTICIPANT_SUFFIX`.
+ *
+ * Returns true when the request may proceed; sends the error otherwise.
+ */
+function senderMatchesToken(
+  req: Request,
+  res: Response,
+  sender: string,
+  userId: string,
+): boolean {
+  const expected = `${userId}::${PARTICIPANT_SUFFIX}`;
+  if (sender === expected) return true;
+  // eslint-disable-next-line no-console
+  console.warn(JSON.stringify({
+    level: 'warn',
+    type: 'party_mismatch',
+    path: req.path,
+    tokenParty: expected,
+    claimedParty: sender,
+  }));
+  res.status(403).json({
+    error: 'party_mismatch',
+    message: 'sender does not match the party for this token',
+  });
+  return false;
+}
+
 router.post('/internal-deposit', json(), async (req: Request, res: Response) => {
   const authHeader = req.headers.authorization;
   if (!authHeader?.startsWith('Bearer ')) {
@@ -103,6 +139,7 @@ router.post('/internal-deposit', json(), async (req: Request, res: Response) => 
   if (!userId) {
     return res.status(401).json({ error: 'Could not extract sub claim from Bearer token' });
   }
+  if (!senderMatchesToken(req, res, sender, userId)) return;
 
   // 1. User's CIP-56 Holdings on our validator.
   let holdings;
@@ -218,6 +255,12 @@ router.get('/internal-balance', async (req: Request, res: Response) => {
     return res.status(400).json({ error: 'required query param: sender' });
   }
   const sender = normalizePartyId(senderRaw);
+
+  const balanceUserId = extractJwtSub(userToken);
+  if (!balanceUserId) {
+    return res.status(401).json({ error: 'Could not extract sub claim from Bearer token' });
+  }
+  if (!senderMatchesToken(req, res, sender, balanceUserId)) return;
 
   // Optional instrument selector. Default = configured instrument (USDCx on
   // testnet). `CC` (a.k.a. Amulet) reads the user's Canton Coin holdings —

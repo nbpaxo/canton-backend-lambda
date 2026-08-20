@@ -502,10 +502,14 @@ export const hypersignProvider: KycProvider = {
       return ok;
     }
 
-    // 3. Neither guard configured: warn. The remaining protection is the
-    //    sessionId→party mapping in the handler (unknown sessions are ignored).
+    // 3. Neither guard configured — reject. Accepting on idToken shape alone
+    //    means anyone who can POST to this URL can approve a KYC for any
+    //    session id they can guess, and the shape check ("three dot-separated
+    //    parts") is trivially satisfied. Persona and Sumsub already fail
+    //    closed on a missing secret; this now matches them.
     if (!HYPERSIGN_WEBHOOK_API_TOKEN) {
-      console.warn('[hypersign] no HYPERSIGN_WEBHOOK_API_TOKEN / _SECRET set — accepting webhook on idToken shape only');
+      console.warn('[hypersign] no HYPERSIGN_WEBHOOK_API_TOKEN / _SECRET set — rejecting webhook');
+      return false;
     }
     return true;
   },

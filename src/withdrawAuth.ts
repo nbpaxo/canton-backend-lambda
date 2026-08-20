@@ -25,14 +25,13 @@
  * authenticates correctly, they can only withdraw against their OWN
  * approval.
  *
- * Open TODO: bind the Loop public key to the party id. Right now we
- * accept whatever publicKey the client sends and the signature only
- * proves "someone with this key signed this message". The real check
- * needs the pubkey-to-party mapping (Splice scan or exchange-backend).
- * Until the same shared-secret S2S channel exists, we can't close this
- * gap. Note: the per-approval partyId match (done by the route) means a
- * malicious caller still can't withdraw against someone else's approval
- * — only spoof being themselves, which is unhelpful for an attacker.
+ * The Loop public key IS bound to the party: a Canton party id's namespace
+ * is SHA256(0x0000000C || publicKey), so we recompute it and require a
+ * match (see loopVerify.ts). Signing with your own key while claiming
+ * another party's id therefore fails here rather than downstream. That
+ * matters because the approval lookup is still a stub that echoes the
+ * request body — so the route's `auth.partyId === approval.partyId` check
+ * on its own would be comparing two attacker-supplied values.
  */
 import { Request } from 'express';
 import { verify as edVerify, createPublicKey } from 'node:crypto';
@@ -43,6 +42,7 @@ import {
   KEYCLOAK_REALM,
   PARTICIPANT_SUFFIX,
 } from './config.js';
+import { checkPartyBinding } from './loopVerify.js';
 
 export type WithdrawAuthMethod = 'keycloak' | 'loop';
 
@@ -169,10 +169,20 @@ function verifyLoopSignature(
   }
   if (!payload.partyId) throw new Error('Loop message missing partyId');
 
-  // TODO(loop-pubkey-binding): verify `pubRaw` is the canonical key for
-  // `payload.partyId` against Splice scan or exchange-backend. Until then,
-  // a malicious client could sign with their own key and claim to be
-  // themselves — caught downstream by the partyId vs approval match.
+  // Bind the signing key to the party. The party id's namespace is
+  // SHA256(0x0000000C || publicKey) (Loop SDK issue #44), so a caller can
+  // only authenticate as a party whose namespace key they actually hold.
+  // Without this, signing with your own key while claiming someone else's
+  // partyId passes — and because the approval lookup is still a stub that
+  // echoes the request body, the downstream `auth.partyId === approval.partyId`
+  // check compares two attacker-supplied values and lets it through.
+  const binding = checkPartyBinding(payload.partyId, pubRaw);
+  if (!binding.ok) {
+    throw new Error(
+      `Loop public key does not control party ${payload.partyId} ` +
+      `(namespace ${binding.expected}, derived ${binding.computed})`,
+    );
+  }
 
   return { partyId: payload.partyId };
 }

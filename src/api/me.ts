@@ -1,11 +1,11 @@
 /**
  * GET /me — caller profile (minimal, since the endpoint is open-auth).
  *
- * Returns ONLY the data needed for the UI to render — no PII fields. Anyone
- * can hit this with any x-party-id while AUTH_MODE=open is in effect, so
- * we deliberately omit email / username / displayName / keycloak_sub.
- * Auto-creates a users row on first call so the watcher + KYC service
- * have a place to attach state.
+ * Returns ONLY the data needed for the UI to render — no PII fields, since
+ * this is the broadest-reach endpoint in the service. Creates a users row on
+ * first call so the watcher + KYC service have a place to attach state; only
+ * an authenticated caller gets here, so that row always corresponds to a
+ * party someone proved they control.
  *
  * Shape:
  *   {
@@ -43,10 +43,15 @@ router.get('/me', requireAuth, async (req: Request, res: Response) => {
   const { party, sub } = (req as AuthenticatedRequest).user;
   const pool = getPool();
 
-  // Auto-create on first call. Default is_external based on auth source:
-  // a Keycloak sub present → validator user (is_external=false); absent →
-  // Loop / external. We DON'T return is_external to the caller (it's a
-  // private flag).
+  // Auto-create on first call, but ONLY for a caller whose identity we
+  // actually proved. Under the old open-auth shim this INSERT ran for
+  // anyone who sent an x-party-id header — a bare `GET /me` was enough to
+  // mint a users row for a party that need not even exist on the ledger,
+  // which is how the table fills with accounts that never touched a wallet.
+  //
+  // Default is_external on the auth source: a Keycloak sub present →
+  // validator user (is_external=false); absent → Loop / external. We DON'T
+  // return is_external to the caller (it's a private flag).
   await pool.query(
     `INSERT INTO users (party_id, is_external, keycloak_sub)
        VALUES ($1, $2, $3)

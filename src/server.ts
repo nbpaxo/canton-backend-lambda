@@ -24,6 +24,7 @@ import withdrawRoutes from './api/withdraw.js';
 import withdrawalsRoutes from './api/withdrawals.js';
 import supportRoutes from './api/support.js';
 import { PORT, CORS_ORIGINS, KYC_PROVIDER } from './config.js';
+import { rateLimit } from './middleware/rateLimit.js';
 
 // ─── Cold-start banner ───────────────────────────────────────────────────
 // Logged once per Lambda container init (= once per cold start). Gives
@@ -40,7 +41,6 @@ console.log(JSON.stringify({
   // host of the DATABASE_URL (no creds) — handy when pointing at the
   // wrong RDS instance is the actual bug.
   databaseHost: process.env.DATABASE_URL?.match(/@([^:/]+)/)?.[1] ?? '<unset>',
-  authMode: process.env.AUTH_MODE ?? 'open',
 }));
 
 // Surface any error that escapes the Express pipeline — these would
@@ -94,6 +94,32 @@ app.use((req: Request, res: Response, next: NextFunction) => {
     }));
   });
   next();
+});
+
+// ─── Rate limits ─────────────────────────────────────────────────────────
+// Tightest on the endpoints that cost real money or send mail on our behalf:
+// each /kyc/start burns paid provider quota, each OTP sends an email, each
+// report posts to Telegram. A broad limit covers everything else so a script
+// can't enumerate parties for free. Per-container only — see rateLimit.ts.
+app.use('/kyc/start', rateLimit('kyc-start', 5, 60 * 60_000));
+app.use('/kyc/email/request-otp', rateLimit('kyc-otp', 5, 60 * 60_000));
+app.use('/support/report', rateLimit('support', 5, 60 * 60_000));
+// Brute-force guard: without this a 6-digit OTP is guessable by enumeration.
+app.use('/kyc/email/verify-otp', rateLimit('kyc-otp-verify', 10, 15 * 60_000));
+// NOTE: /validate-invite and /signup are deliberately NOT rate limited here.
+// A per-IP cap punishes real users — mobile carrier CGNAT puts large numbers
+// of genuine signups behind a single address, which is precisely what a
+// marketing push looks like. Brute-force protection for the invite-code
+// oracle belongs at the edge (WAF) and in the code entropy, not here.
+app.use('/me', rateLimit('me', 60, 60_000));
+
+// Broad backstop for everything else. Provider webhooks are exempt — they
+// are HMAC-verified, arrive in bursts from a handful of provider IPs, and
+// dropping one loses a KYC decision.
+const globalLimit = rateLimit('global', 300, 60_000);
+app.use((req: Request, res: Response, next: NextFunction) => {
+  if (req.path.startsWith('/kyc/webhook')) return next();
+  return globalLimit(req, res, next);
 });
 
 // KYC webhook must read the raw body for HMAC verification — so we mount

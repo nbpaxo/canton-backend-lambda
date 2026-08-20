@@ -37,10 +37,10 @@ export interface DepositRecordInfo {
  * Read all CIP-56 Holdings owned by `userParty`. Optionally filter by
  * instrument (we default to whatever's in env via the caller).
  *
- * Note: queries as the user's party. With AUTH_MODE=open we don't have a
- * user JWT, so we fall back to an operator-scoped query and filter
- * client-side by owner. That's fine for read but doesn't generalize for
- * mutations.
+ * Note: queries as the user's party. Loop callers authenticate with a wallet
+ * signature rather than a ledger JWT, so there is no user token to submit
+ * with — we fall back to an operator-scoped query and filter client-side by
+ * owner. Fine for reads; doesn't generalize to mutations.
  */
 export async function getUserHoldings(
   config: CantonSdkConfig,

@@ -132,6 +132,17 @@ router.post('/withdraw', json(), async (req: Request, res: Response) => {
   try {
     auth = await authenticateWithdraw(req, { approvalId: body.approvalId });
     wlog('auth_ok', { authMethod: auth.authMethod });
+
+    // The party proved by the credential is the only identity we trust. The
+    // body also carries one; if the two disagree the request stops here
+    // rather than picking a winner. Checked BEFORE the approval lookup so
+    // it holds regardless of what that lookup returns (it is still a stub
+    // that echoes the body back — see services/withdrawApproval.ts).
+    if (normalizePartyId(body.partyId) !== auth.partyId) {
+      throw new Error(
+        `party mismatch: authenticated as ${auth.partyId}, request claims ${body.partyId}`,
+      );
+    }
   } catch (err) {
     wlog('auth_failed', { error: (err as Error).message });
     await recordFailedAttempt(pool, {
