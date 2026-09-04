@@ -16,7 +16,14 @@ export type AlertType =
   | 'watcher_stale'       // E: deposit-watcher heartbeat gone stale
   // ── event alerts (unique dedup key) ──
   | 'withdraw_failed'     // F: a failed_withdraw_attempts row was written
-  | 'deposit_stuck';      // G: held deposit / exchange notify exhausted
+  | 'deposit_stuck'       // G: held deposit / exchange notify exhausted
+  // H: a signup failed partway and the rollback could not finish. The user is
+  //    left with an orphaned Keycloak account that blocks their username and
+  //    email, so this needs a human — it cannot self-heal.
+  | 'signup_orphan_user'
+  // I: a failed signup's invite code could not be released, so the user
+  //    cannot retry until someone frees it.
+  | 'signup_compensation_failed';
 
 export interface RegisterAlertInput {
   type: AlertType;

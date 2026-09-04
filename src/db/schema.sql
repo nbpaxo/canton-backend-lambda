@@ -406,3 +406,123 @@ CREATE TABLE IF NOT EXISTS audit_log (
 );
 CREATE INDEX IF NOT EXISTS audit_log_user_idx
   ON audit_log (user_party_id, created_at DESC) WHERE user_party_id IS NOT NULL;
+
+
+-- ─── Referral codes ──────────────────────────────────────────────────────
+-- One active shareable code per user. Kept in its own table rather than as a
+-- column on `users` so a code can be disabled or rotated without touching the
+-- user row, and so `code` gets a primary key of its own for lookups.
+--
+-- Codes are stored UPPERCASE and matched exactly. Every write path uppercases
+-- before it gets here; the CHECK makes that an invariant the DB enforces
+-- rather than a convention each call site has to remember.
+--
+-- Generated from a Crockford-style alphabet with 0/O/1/I/L removed, so a code
+-- read aloud or copied off a screenshot can't land on the wrong account.
+CREATE TABLE IF NOT EXISTS referral_codes (
+  code            TEXT PRIMARY KEY CHECK (code = UPPER(code) AND LENGTH(code) BETWEEN 4 AND 32),
+  owner_party_id  TEXT NOT NULL REFERENCES users(party_id),
+  kind            TEXT NOT NULL DEFAULT 'auto'
+                    CHECK (kind IN ('auto', 'vanity')),
+  -- status — moderation lever on a single code.
+  --
+  -- TODAY: every read filters `status = 'active'` (lookupActiveCode,
+  --   getOrCreateCode) and the partial unique index below is scoped to it, so
+  --   the column is honoured everywhere. But NOTHING currently writes
+  --   'disabled' — there is no endpoint or admin command for it, so in
+  --   practice every row is 'active'.
+  --
+  -- INTENDED USE: retire an abusive or leaked code without destroying
+  --   history. Deleting the row is not an option — `referrals.code` has a
+  --   foreign key to it, so a code that anyone has already used cannot be
+  --   removed. Setting 'disabled' stops the code resolving for NEW binds
+  --   while every referral already earned through it stays intact and keeps
+  --   counting. Disabling also frees the partial unique index, so the owner
+  --   can be issued a replacement code.
+  --
+  -- To make it real, add a disable/enable command to
+  --   scripts/referral-admin.ts; the read paths need no changes.
+  status          TEXT NOT NULL DEFAULT 'active'
+                    CHECK (status IN ('active', 'disabled')),
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+-- Exactly one active code per user — the one /referral/me returns.
+CREATE UNIQUE INDEX IF NOT EXISTS referral_codes_owner_active_uidx
+  ON referral_codes (owner_party_id)
+  WHERE status = 'active';
+CREATE INDEX IF NOT EXISTS referral_codes_owner_idx
+  ON referral_codes (owner_party_id);
+
+
+-- ─── Referrals (the referrer → referee edge) ─────────────────────────────
+-- ONE LEVEL ONLY: a referrer earns from the users they directly referred, and
+-- nothing from those users' own referrals. Nothing here walks a tree.
+--
+-- referee_party_id is the PRIMARY KEY, which is what makes "a user can be
+-- referred exactly once, ever" a database guarantee instead of a check every
+-- call site has to remember. A second bind attempt fails on conflict — that
+-- is the intended behaviour for the signup path, the Loop 24h window, and the
+-- admin backfill script alike.
+--
+-- Binding counts immediately; there is no qualification gate. That is safe
+-- because points derive from VOLUME: a farmed wallet that never trades earns
+-- its referrer nothing, so trading activity is the implicit filter.
+--
+-- How mpoints will read this later (no schema change needed):
+--   referrer's referral volume for a day
+--     = SUM(daily_user_volume.volume)
+--       FROM referrals JOIN daily_user_volume ON referee_party_id
+--      WHERE referrer_party_id = $1 AND status = 'active'
+--   `bound_at` is kept so the "count volume only from the bind date" vs
+--   "count the referee's whole history" decision can be made later.
+CREATE TABLE IF NOT EXISTS referrals (
+  referee_party_id  TEXT PRIMARY KEY REFERENCES users(party_id),
+  referrer_party_id TEXT NOT NULL REFERENCES users(party_id),
+  code              TEXT NOT NULL REFERENCES referral_codes(code),
+  bound_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  -- signup      → mperps user entered it on the signup form
+  -- loop_window → Loop wallet user bound within the post-connect window
+  -- admin       → backfilled by scripts/referral-bind.ts
+  bind_source       TEXT NOT NULL
+                      CHECK (bind_source IN ('signup', 'loop_window', 'admin')),
+  -- status — whether this referral edge currently counts.
+  --
+  -- TODAY: actively used, unlike referral_codes.status.
+  --   • WRITTEN by scripts/referral-admin.ts `unbind` and `reassign`, which
+  --     set 'revoked' together with revoked_at + revoked_reason.
+  --   • READ by every query, all of which filter `status = 'active'`, so a
+  --     revoked edge immediately drops out of the referrer's summary count,
+  --     their friends list, and getInviter for the referee.
+  --   • LOAD-BEARING in bindReferral's upsert, whose
+  --     `ON CONFLICT ... DO UPDATE ... WHERE referrals.status = 'revoked'`
+  --     lets a revoked row be re-bound while an ACTIVE row stays immutable.
+  --     Without that clause an unbind was a one-way door: the revoked row
+  --     still held the primary key, so the user could never be re-bound and
+  --     getReferralState reported bound=false while every bind attempt
+  --     failed with already_bound.
+  --
+  -- WHY REVOKE RATHER THAN DELETE: referee_party_id is the primary key, so
+  --   this row is also the record that the user WAS referred. Revoking keeps
+  --   revoked_at/revoked_reason as an audit trail for a fraud reversal or a
+  --   support case; deleting would erase that.
+  --
+  -- FOR THE POINTS SERVICE: treat 'revoked' as "never earned". Referral
+  --   volume rollups must filter `status = 'active'` (see the query sketch
+  --   above), otherwise a reversed attribution keeps paying out.
+  status            TEXT NOT NULL DEFAULT 'active'
+                      CHECK (status IN ('active', 'revoked')),
+  revoked_at        TIMESTAMPTZ,
+  revoked_reason    TEXT,
+  -- Catches the trivial case only. Someone with both an mperps account and a
+  -- Loop wallet has two distinct party ids and can still self-refer; that is
+  -- accepted, since points require real volume and real volume means real
+  -- fees paid to us.
+  CONSTRAINT referrals_no_self CHECK (referee_party_id <> referrer_party_id)
+);
+-- Drives the referral page's friends list (newest first) and the referral
+-- volume rollup. Partial on active so revoked edges cost nothing to skip.
+CREATE INDEX IF NOT EXISTS referrals_referrer_idx
+  ON referrals (referrer_party_id, bound_at DESC)
+  WHERE status = 'active';
+CREATE INDEX IF NOT EXISTS referrals_code_idx
+  ON referrals (code);

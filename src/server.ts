@@ -23,6 +23,7 @@ import userTransfersRoutes from './api/userTransfers.js';
 import withdrawRoutes from './api/withdraw.js';
 import withdrawalsRoutes from './api/withdrawals.js';
 import supportRoutes from './api/support.js';
+import referralRoutes from './api/referral.js';
 import { PORT, CORS_ORIGINS, KYC_PROVIDER } from './config.js';
 import { rateLimit } from './middleware/rateLimit.js';
 
@@ -112,6 +113,13 @@ app.use('/kyc/email/verify-otp', rateLimit('kyc-otp-verify', 10, 15 * 60_000));
 // marketing push looks like. Brute-force protection for the invite-code
 // oracle belongs at the edge (WAF) and in the code entropy, not here.
 app.use('/me', rateLimit('me', 60, 60_000));
+// The only unauthenticated referral route: it answers "is this code real?"
+// so the signup form can validate before an account exists. Capped so the
+// code space can't be swept in bulk.
+app.use('/referral/validate', rateLimit('referral-validate', 30, 60_000));
+// Binding is one-shot per account, so anything beyond a couple of attempts
+// is someone trying codes rather than a user fixing a typo.
+app.use('/referral/bind', rateLimit('referral-bind', 10, 60 * 60_000));
 
 // Broad backstop for everything else. Provider webhooks are exempt — they
 // are HMAC-verified, arrive in bursts from a handful of provider IPs, and
@@ -138,6 +146,7 @@ app.use('/', internalDepositRoutes);
 app.use('/', userTransfersRoutes);
 app.use('/', withdrawRoutes);
 app.use('/', withdrawalsRoutes);
+app.use('/', referralRoutes);
 app.use('/', supportRoutes);
 
 // ─── 404 + error handlers (JSON, never HTML) ─────────────────────────────
