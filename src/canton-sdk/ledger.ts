@@ -516,6 +516,68 @@ export async function getCantonUser(
 }
 
 /**
+ * List the parties a Canton user may act as / read as.
+ *
+ * Used to pre-flight a multi-party submission: adding a party to `actAs`
+ * without the right is a hard submission rejection, so callers that enrich a
+ * submission with an extra party check here first and drop the enrichment
+ * rather than risk the primary command.
+ */
+export async function listUserRights(
+  config: CantonSdkConfig,
+  token: string,
+  userId: string,
+): Promise<{ actAs: string[]; readAs: string[] }> {
+  const res = await fetch(`${config.cantonLedgerApi}/v2/users/${userId}/rights`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) throw new Error(`List rights failed (${res.status}): ${await res.text()}`);
+
+  const data = await res.json() as { rights?: Array<Record<string, any>> };
+  const actAs: string[] = [];
+  const readAs: string[] = [];
+  for (const r of data.rights ?? []) {
+    // Canton 3 wraps oneof variants as { kind: { CanActAs: { value: { party } } } }.
+    const kind = (r.kind ?? r) as Record<string, any>;
+    const act = kind.CanActAs?.value?.party ?? kind.CanActAs?.party;
+    const read = kind.CanReadAs?.value?.party ?? kind.CanReadAs?.party;
+    if (typeof act === 'string') actAs.push(act);
+    if (typeof read === 'string') readAs.push(read);
+  }
+  return { actAs, readAs };
+}
+
+/**
+ * Revoke a Canton right (CanActAs/CanReadAs) from a user.
+ *
+ * `PATCH /v2/users/{user-id}/rights` — verified against the participant's own
+ * OpenAPI spec (`RevokeUserRightsRequest`); the body mirrors the grant shape.
+ * Requires ParticipantAdmin, hence the admin token.
+ *
+ * Unlike `grantRight`, a failure here is NOT swallowed: leaving an unintended
+ * CanActAs in place is a standing privilege, so the caller must see it.
+ */
+export async function revokeRight(
+  config: CantonSdkConfig,
+  adminToken: string,
+  userId: string,
+  kind: 'CanActAs' | 'CanReadAs',
+  party: string,
+): Promise<void> {
+  const res = await fetch(`${config.cantonLedgerApi}/v2/users/${userId}/rights`, {
+    method: 'PATCH',
+    headers: {
+      Authorization: `Bearer ${adminToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ userId, identityProviderId: '', rights: [{ kind: { [kind]: { value: { party } } } }] }),
+  });
+  if (!res.ok) {
+    throw new Error(`Revoke ${kind}(${party}) failed (${res.status}): ${(await res.text()).slice(0, 300)}`);
+  }
+}
+
+/**
  * Grant a Canton right (CanActAs/CanReadAs) to a user.
  */
 export async function grantRight(

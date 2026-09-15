@@ -92,6 +92,13 @@ export const PARTIES = {
   operator:  process.env.OPERATOR_PARTY_ID   || `mperpoperator::${PARTICIPANT_SUFFIX}`,
   vaultPool: process.env.VAULT_POOL_PARTY_ID || `mperpvaultpool::${PARTICIPANT_SUFFIX}`,
   treasury:  process.env.TREASURY_PARTY_ID   || `mperptreasury::${PARTICIPANT_SUFFIX}`,
+  // Validator/node operator party — the one we nominate to the Canton
+  // Foundation as our featured-app provider. It is the controller of
+  // `FeaturedAppRight_CreateActivityMarker`, so it must appear in `actAs`
+  // on any submission that emits an activity marker. Deliberately NOT the
+  // same party as `operator` (the exchange's own party).
+  // Unset ⇒ activity markers are disabled (see canton-sdk/featuredApp.ts).
+  nodeOperator: process.env.NODE_OPERATOR_PARTY_ID || '',
   // Token issuer = DSO when INSTRUMENT_VARIANT=amulet (devnet default).
   tokenIssuer: process.env.INSTRUMENT_ADMIN_PARTY_ID
     || `DSO::1220be58c29e65de40bf273be1dc2b266d43a9a002ea5b18955aeef7aac881bb471a`,
