@@ -24,6 +24,7 @@ import withdrawRoutes from './api/withdraw.js';
 import withdrawalsRoutes from './api/withdrawals.js';
 import supportRoutes from './api/support.js';
 import referralRoutes from './api/referral.js';
+import pointsRoutes from './api/points.js';
 import { PORT, CORS_ORIGINS, KYC_PROVIDER } from './config.js';
 import { rateLimit } from './middleware/rateLimit.js';
 
@@ -147,6 +148,7 @@ app.use('/', userTransfersRoutes);
 app.use('/', withdrawRoutes);
 app.use('/', withdrawalsRoutes);
 app.use('/', referralRoutes);
+app.use('/', pointsRoutes);
 app.use('/', supportRoutes);
 
 // ─── 404 + error handlers (JSON, never HTML) ─────────────────────────────
