@@ -229,12 +229,40 @@ export async function getSummary(db: Db, partyId: string): Promise<ReferralSumma
       WHERE referrer_party_id = $1 AND status = 'active'`,
     [partyId],
   );
-  return {
+  const summary: ReferralSummary = {
     referredFriends: Number(res.rows[0]?.referred_friends ?? '0'),
     totalVolume: null,
     totalRewards: null,
     friendsWhoTraded: null,
   };
+
+  // Volume / rewards come from the mpoints-service tables (shared Postgres).
+  // Stay null — never 0 — when the service isn't provisioned on this DB or no
+  // competition is active, so the UI keeps rendering "—" rather than "0".
+  try {
+    const mp = await db.query<{ volume: string; points: string; traded: string }>(
+      `WITH cfg AS (SELECT id, start_at, end_at FROM mp_competition_config WHERE status = 'active' ORDER BY id DESC LIMIT 1)
+       SELECT COALESCE(t.total_volume, 0)::text AS volume,
+              COALESCE(t.total_points, 0)::text AS points,
+              (SELECT COUNT(DISTINCT a.referee_party_id)
+                 FROM mp_referral_attribution a
+                WHERE a.referrer_party_id = $1 AND a.volume > 0
+                  AND a.day >= (cfg.start_at AT TIME ZONE 'UTC')::date
+                  AND a.day <  (cfg.end_at   AT TIME ZONE 'UTC')::date)::text AS traded
+         FROM cfg
+         LEFT JOIN mp_points_total t ON t.party_id = $1 AND t.config_id = cfg.id AND t.source = 'trade_referral'`,
+      [partyId],
+    );
+    const row = mp.rows[0];
+    if (row) {
+      summary.totalVolume = Math.round(Number(row.volume) * 100) / 100;
+      summary.totalRewards = Math.round(Number(row.points) * 100) / 100;
+      summary.friendsWhoTraded = Number(row.traded);
+    }
+  } catch (err) {
+    if (!/relation "mp_/.test((err as Error).message ?? '')) throw err;
+  }
+  return summary;
 }
 
 export interface InviterInfo {
