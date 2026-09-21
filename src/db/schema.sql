@@ -480,11 +480,18 @@ CREATE TABLE IF NOT EXISTS referrals (
   referrer_party_id TEXT NOT NULL REFERENCES users(party_id),
   code              TEXT NOT NULL REFERENCES referral_codes(code),
   bound_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  -- signup      → mperps user entered it on the signup form
-  -- loop_window → Loop wallet user bound within the post-connect window
-  -- admin       → backfilled by scripts/referral-bind.ts
+  -- How the bind happened. There is NO time limit on any of these — a user
+  -- may attach a referral code at any point, exactly once.
+  --   signup       → entered on the mperps signup form, bound in that txn
+  --   self_service → entered later by the user themselves, from the referral
+  --                  page or the first-connect modal (either user type)
+  --   admin        → set by scripts/referral-admin.ts
+  --   loop_window  → LEGACY. Written while binding was restricted to 24h
+  --                  after a Loop wallet's first connect. Kept so existing
+  --                  rows still validate; nothing writes it any more.
   bind_source       TEXT NOT NULL
-                      CHECK (bind_source IN ('signup', 'loop_window', 'admin')),
+                      CHECK (bind_source IN
+                        ('signup', 'self_service', 'admin', 'loop_window')),
   -- status — whether this referral edge currently counts.
   --
   -- TODAY: actively used, unlike referral_codes.status.
@@ -519,6 +526,30 @@ CREATE TABLE IF NOT EXISTS referrals (
   -- fees paid to us.
   CONSTRAINT referrals_no_self CHECK (referee_party_id <> referrer_party_id)
 );
+-- Keep the bind_source CHECK in sync with the current taxonomy.
+--
+-- Necessary because the CREATE TABLE above is a no-op once the table exists,
+-- so a constraint added there never updates on a database that has already
+-- been applied to — the exact failure this hit when 'self_service' was
+-- introduced and existing databases still rejected it. Same pattern as
+-- failed_withdraw_attempts above.
+DO $$
+DECLARE
+  cname TEXT;
+BEGIN
+  FOR cname IN
+    SELECT conname FROM pg_constraint
+    WHERE conrelid = 'referrals'::regclass
+      AND conname LIKE 'referrals_bind_source_check%'
+  LOOP
+    EXECUTE 'ALTER TABLE referrals DROP CONSTRAINT ' || quote_ident(cname);
+  END LOOP;
+
+  ALTER TABLE referrals
+    ADD CONSTRAINT referrals_bind_source_check
+    CHECK (bind_source IN ('signup', 'self_service', 'admin', 'loop_window'));
+END $$;
+
 -- Drives the referral page's friends list (newest first) and the referral
 -- volume rollup. Partial on active so revoked edges cost nothing to skip.
 CREATE INDEX IF NOT EXISTS referrals_referrer_idx

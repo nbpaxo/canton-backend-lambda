@@ -113,12 +113,13 @@ router.get('/me', requireAuth, async (req: Request, res: Response) => {
     emailRequired = false;
   }
 
-  // Referral state drives the Loop wallet prompt: the app shows it when
-  // `canBind && !bound`. Included here rather than behind its own call
+  // Referral state drives the first-connect prompt: the app shows it when
+  // `showPrompt` is true. Included here rather than behind its own call
   // because /me is what the app already hits on load, and a separate request
   // would race the prompt against first paint.
   //
-  // `canBind` is advisory — POST /referral/bind re-checks the window itself.
+  // `canBind` means "hasn't used their one chance yet" — there is no deadline
+  // on binding. `showPrompt` is the separate, time-limited nag control.
   const referral = await getReferralState(pool, party);
 
   res.json({
@@ -130,7 +131,7 @@ router.get('/me', requireAuth, async (req: Request, res: Response) => {
       bound: referral.bound,
       referredByCode: referral.referredByCode,
       canBind: referral.canBind,
-      windowExpiresAt: referral.windowExpiresAt,
+      showPrompt: referral.showPrompt,
     },
     instrument: {
       id: INSTRUMENT_ID,

@@ -383,19 +383,19 @@ export const TURNSTILE_ENABLED =
 export const REFERRAL_CODE_LENGTH = Number(process.env.REFERRAL_CODE_LENGTH || '7');
 
 /**
- * How long a Loop wallet user has to attach a referral code, measured from
- * `users.created_at` — which for Loop users is set the first time they hit an
- * authenticated endpoint after connecting their wallet (see api/me.ts). They
- * never sign up, so there is no form to put the field on; the app prompts
- * them on first connect and the window is the outer bound.
+ * How long after account creation the app PROMPTS for a referral code.
  *
- * Enforced SERVER-SIDE in POST /referral/bind. The UI also hides the field
- * once the window closes, but that is a convenience, not the control.
+ * This is a nudge window, NOT a restriction. Any user can attach a referral
+ * code at any time from the referral page, for as long as they haven't got
+ * one — there is no deadline on binding.
  *
- * mperps users are unaffected: they bind during signup, atomically.
+ * It exists only so the first-connect modal doesn't reappear on every page
+ * load forever for someone who simply doesn't have a code. After this many
+ * hours the modal stops volunteering itself and the referral page remains the
+ * way in.
  */
-export const REFERRAL_BIND_WINDOW_HOURS = Number(
-  process.env.REFERRAL_BIND_WINDOW_HOURS || '24',
+export const REFERRAL_PROMPT_HOURS = Number(
+  process.env.REFERRAL_PROMPT_HOURS || '24',
 );
 
 /** Base URL used to build the shareable referral link (`<base>/?ref=CODE`). */
