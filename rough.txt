@@ -1,0 +1,29 @@
+Still waiting on you — three independent things
+
+  1. Commit. Now five things are uncommitted: mpoints-service/ (service + tests, no git repo yet), canton-backend-lambda (points route), event-listener (sync/scheduler), and the frontend temp-ui branch
+     (delete or keep). Say go and I'll commit each repo separately.
+  2. Testnet DB. The testnet canton DATABASE_URL, or the go-ahead to deploy the worker to the validator EC2 — that's what turns on real referral points.
+  3. The three read endpoints (/points/me/daily, /points/leaderboard, /points/me/referrals) for the mainnet-referral UI — build now?
+
+
+
+demo prep is a full reset:all + set EXCHANGE_API_URL/SECRET to mainnet, then sync.
+
+Command ->  npm run reset:all -- --yes                     | npm run reset:competition -- --yes
+Wipes -> every mp_* table incl. trades, and the feed lock  | configs, daily/total points, referral attribution, adjustments, dirty queue 
+Keeps -> nothing in mp_* (canton untouched)                | trades, ledger, party map, feed lock
+When -> Before the demo — see below                        | After the demo — what you asked for
+
+
+
+Ready for the demo — the sequence
+
+  # 1. prep (worker stopped): clear testnet data + lock, point at mainnet
+  npm run reset:all -- --yes
+  # edit .env: EXCHANGE_API_URL=https://alpha-be.mperps.xyz  EXCHANGE_API_SECRET=<mainnet secret>
+  npm run sync:once
+  # 2. competition
+  npm run config:create -- --name "Demo" --start <ISO> --end <ISO> --pvu 1000 --ppu 10 --rvu 1000 --rpu 2
+  npm run points:once && npm run status
+  # 3. after the demo
+  npm run reset:competition -- --yes      # or reset:all
