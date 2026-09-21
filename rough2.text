@@ -1,0 +1,211 @@
+vinaysagar ~  $ docker ps
+CONTAINER ID   IMAGE                           COMMAND                  CREATED         STATUS                  PORTS                      NAMES
+26a34b2d9fee   postgres:16-alpine              "docker-entrypoint.s…"   26 hours ago    Up 26 hours (healthy)   0.0.0.0:5436->5432/tcp     canton-backend-postgres
+a1b4d00f0a7e   postgres                        "docker-entrypoint.s…"   7 days ago      Up 7 days               0.0.0.0:5433->5432/tcp     my-postgres
+b02c9d19f4f5   mongo:4.2                       "docker-entrypoint.s…"   14 months ago   Up 7 days               0.0.0.0:27017->27017/tcp   mongo
+11210cbd3f47   moby/buildkit:buildx-stable-1   "buildkitd --allow-i…"   15 months ago   Up 7 days                                          buildx_buildkit_mybuilder0
+vinaysagar ~  $ 
+                                                                                                                                                                                                          
+vinaysagar ~  $ 
+vinaysagar ~  $ PGPASSWORD=canton_backend psql -h localhost -p 5436 -U canton_backend -d canton_backend -c "SELECT 'mp_trades' t, count(*) FROM mp_trades UNION ALL SELECT 'mp_account_party_map', count(*) FROM
+  mp_account_party_map UNION ALL SELECT 'mp_identity_lookups', count(*) FROM mp_identity_lookups UNION ALL SELECT 'mp_daily_user_volume', count(*) FROM mp_daily_user_volume UNION ALL SELECT
+  'mp_points_daily', count(*) FROM mp_points_daily UNION ALL SELECT 'mp_points_total', count(*) FROM mp_points_total UNION ALL SELECT 'mp_competition_config', count(*) FROM mp_competition_config ORDER
+  BY 1;"
+           t           | count 
+-----------------------+-------
+ mp_account_party_map  |    14
+ mp_competition_config |     1
+ mp_daily_user_volume  |    41
+ mp_identity_lookups   |    39
+ mp_points_daily       |    41
+ mp_points_total       |    14
+ mp_trades             |  1585
+(7 rows)
+
+vinaysagar ~  $ 
+vinaysagar ~  $ 
+vinaysagar ~  $ 
+vinaysagar ~  $ PGPASSWORD=canton_backend psql -h localhost -p 5436 -U canton_backend -d canton_backend -c "SELECT id, account_id, left(party_id,30) AS party, symbol, side, price, quantity, volume_usdt, traded_at,
+  aggregated_at IS NOT NULL AS counted FROM mp_trades ORDER BY traded_at LIMIT 15;"
+ id | account_id | party | symbol  | side |  price  | quantity | volume_usdt |         traded_at          | counted 
+----+------------+-------+---------+------+---------+----------+-------------+----------------------------+---------
+ 1  | 31         |       | BTCUSDT | BUY  |   87153 |    0.002 |  174.306000 | 2025-11-25 10:28:28.833+00 | f
+ 2  | 30         |       | BTCUSDT | BUY  | 87199.1 |    0.002 |  174.398200 | 2025-11-25 10:43:14.933+00 | f
+ 3  | 38         |       | BTCUSDT | BUY  | 87330.3 |    0.056 | 4890.496800 | 2025-11-25 10:55:31.977+00 | f
+ 4  | 31         |       | BTCUSDT | SELL | 87311.9 |    0.002 |  174.623800 | 2025-11-25 11:03:17.022+00 | f
+ 5  | 27         |       | BTCUSDT | SELL | 87606.4 |    0.002 |  175.212800 | 2025-11-25 11:10:54.603+00 | f
+ 6  | 39         |       | BTCUSDT | BUY  |   87754 |    0.002 |  175.508000 | 2025-11-25 11:23:07.537+00 | f
+ 7  | 39         |       | BTCUSDT | SELL | 87266.4 |    0.002 |  174.532800 | 2025-11-25 11:23:32.504+00 | f
+ 8  | 39         |       | BTCUSDT | BUY  | 87377.3 |    0.002 |  174.754600 | 2025-11-25 11:54:57.297+00 | f
+ 9  | 39         |       | BTCUSDT | SELL | 87297.7 |    0.002 |  174.595400 | 2025-11-25 11:55:58.46+00  | f
+ 10 | 39         |       | BTCUSDT | SELL | 87329.9 |    0.002 |  174.659800 | 2025-11-25 11:56:36.961+00 | f
+ 11 | 39         |       | BTCUSDT | BUY  | 87297.8 |    0.002 |  174.595600 | 2025-11-25 11:56:46.515+00 | f
+ 12 | 37         |       | BTCUSDT | SELL | 87584.5 |    0.004 |  350.338000 | 2025-11-25 12:28:35.315+00 | f
+ 13 | 31         |       | BTCUSDT | BUY  |   86000 |    0.003 |  258.000000 | 2025-11-25 13:38:43.618+00 | f
+ 14 | 41         |       | BTCUSDT | BUY  |   86350 |    0.002 |  172.700000 | 2025-11-25 19:35:47.136+00 | f
+ 15 | 41         |       | BTCUSDT | SELL |   86318 |    0.002 |  172.636000 | 2025-11-25 19:35:53.436+00 | f
+(15 rows)
+
+vinaysagar ~  $ 
+vinaysagar ~  $ 
+vinaysagar ~  $ 
+vinaysagar ~  $ PGPASSWORD=canton_backend psql -h localhost -p 5436 -U canton_backend -d canton_backend -c "SELECT l.account_id, l.status, l.user_id, left(l.party_id,40) AS party_id, (SELECT count(*) FROM mp_trades t
+  WHERE t.account_id = l.account_id) AS trades FROM mp_identity_lookups l ORDER BY l.status, l.account_id::int;"
+ account_id |  status  | user_id |                 party_id                 | trades 
+------------+----------+---------+------------------------------------------+--------
+ 19         | no_party | 27      |                                          |     11
+ 21         | no_party | 29      |                                          |      7
+ 22         | no_party | 30      |                                          |      2
+ 27         | no_party | 35      |                                          |     50
+ 30         | no_party | 38      |                                          |      2
+ 31         | no_party | 39      |                                          |      5
+ 37         | no_party | 45      |                                          |      3
+ 38         | no_party | 46      |                                          |      2
+ 39         | no_party | 47      |                                          |      6
+ 41         | no_party | 49      |                                          |      6
+ 42         | no_party | 50      |                                          |      3
+ 46         | no_party | 54      |                                          |      2
+ 48         | no_party | 56      |                                          |     12
+ 49         | no_party | 57      |                                          |      2
+ 53         | no_party | 61      |                                          |     16
+ 54         | no_party | 62      |                                          |      5
+ 55         | no_party | 63      |                                          |      2
+ 56         | no_party | 64      |                                          |      3
+ 57         | no_party | 65      |                                          |      2
+ 58         | no_party | 66      |                                          |      4
+ 60         | no_party | 68      |                                          |      3
+ 61         | no_party | 69      |                                          |      9
+ 62         | no_party | 70      |                                          |      3
+ 65         | no_party | 73      |                                          |    148
+ 67         | no_party | 75      |                                          |    160
+ 74         | resolved | 82      | alex::1220327e3eff51506a46b72ae1ec0c0547 |      2
+ 75         | resolved | 83      | roasted-cashew::1220327e3eff51506a46b72a |     29
+ 76         | resolved | 84      | neeraj::1220327e3eff51506a46b72ae1ec0c05 |      2
+ 77         | resolved | 85      | 1f55c3abfe52a505fce051ad0557ff8a::122061 |      2
+ 79         | resolved | 87      | 5d495aae1ae4a14b2129b0e23b48f0ee::122058 |      2
+ 80         | resolved | 88      | 51e524c75258d896275eced13387212d::122041 |      2
+ 82         | resolved | 90      | f5c8df0d-60b2-47ae-bb72-6dd2849194dd::12 |     67
+ 83         | resolved | 91      | f2ad15d49f60528bec43f9d466e25ea0::1220f1 |      8
+ 84         | resolved | 92      | c61ccdd29560131bf9f3cfcfdd5a10c7::122014 |      2
+ 86         | resolved | 94      | 0b7ad4c9-f0a4-46b6-9981-91bac0dbeebd::12 |     12
+ 88         | resolved | 96      | f08258a4-cfd2-4e1c-b4d2-a4ac7afbb332::12 |    964
+ 91         | resolved | 99      | 28435585-1a55-44e1-b816-15dddb15a00b::12 |     11
+ 97         | resolved | 105     | d7a69cb0705dbc8f61929dd89db55083::122047 |     12
+ 98         | resolved | 106     | 08e1a9356d378ceaf0a8063c7cb12fb9::1220cb |      2
+(39 rows)
+
+vinaysagar ~  $ 
+vinaysagar ~  $ 
+vinaysagar ~  $ 
+vinaysagar ~  $ 
+vinaysagar ~  $ PGPASSWORD=canton_backend psql -h localhost -p 5436 -U canton_backend -d canton_backend -c "SELECT rank() OVER (ORDER BY sum(total_points) DESC) AS rank, left(party_id,40) AS party,
+  round(sum(total_volume),2) AS volume_usdt, round(sum(total_points),2) AS points FROM mp_points_total WHERE config_id = 1 GROUP BY party_id ORDER BY points DESC;"
+ rank |                  party                   | volume_usdt | points  
+------+------------------------------------------+-------------+---------
+    1 | f08258a4-cfd2-4e1c-b4d2-a4ac7afbb332::12 |   211632.64 | 2116.32
+    2 | d7a69cb0705dbc8f61929dd89db55083::122047 |    10471.21 |  104.71
+    3 | f5c8df0d-60b2-47ae-bb72-6dd2849194dd::12 |     8539.25 |   85.37
+    4 | 28435585-1a55-44e1-b816-15dddb15a00b::12 |     2372.01 |   23.72
+    5 | roasted-cashew::1220327e3eff51506a46b72a |     1558.64 |   15.59
+    6 | c61ccdd29560131bf9f3cfcfdd5a10c7::122014 |      772.61 |    7.73
+    7 | 0b7ad4c9-f0a4-46b6-9981-91bac0dbeebd::12 |      684.05 |    6.85
+    8 | neeraj::1220327e3eff51506a46b72ae1ec0c05 |      487.96 |    4.88
+    9 | 08e1a9356d378ceaf0a8063c7cb12fb9::1220cb |      291.29 |    2.91
+   10 | f2ad15d49f60528bec43f9d466e25ea0::1220f1 |      204.15 |    2.04
+   11 | 51e524c75258d896275eced13387212d::122041 |      202.10 |    2.02
+   12 | 1f55c3abfe52a505fce051ad0557ff8a::122061 |       72.00 |    0.72
+   12 | 5d495aae1ae4a14b2129b0e23b48f0ee::122058 |       72.10 |    0.72
+   14 | alex::1220327e3eff51506a46b72ae1ec0c0547 |       52.22 |    0.52
+(14 rows)
+
+vinaysagar ~  $ 
+vinaysagar ~  $ 
+vinaysagar ~  $ 
+vinaysagar ~  $ 
+vinaysagar ~  $ PGPASSWORD=canton_backend psql -h localhost -p 5436 -U canton_backend -d canton_backend -c "SELECT v.day, v.trade_count, v.volume AS volume_usdt, p.points, v.finalized_at IS NOT NULL AS finalized FROM
+  mp_daily_user_volume v LEFT JOIN mp_points_daily p ON p.party_id = v.party_id AND p.day = v.day AND p.source = 'trade_personal' WHERE v.party_id LIKE 'neeraj::%' ORDER BY v.day;"
+    day     | trade_count | volume_usdt |  points  | finalized 
+------------+-------------+-------------+----------+-----------
+ 2026-05-07 |           2 |  487.961700 | 4.880000 | t
+(1 row)
+
+vinaysagar ~  $ 
+vinaysagar ~  $ 
+vinaysagar ~  $ 
+vinaysagar ~  $ PGPASSWORD=canton_backend psql -h localhost -p 5436 -U canton_backend -d canton_backend -c "SELECT id, name, start_at, end_at, personal_volume_unit, personal_points_per_unit, referral_volume_unit,
+  referral_points_per_unit, status FROM mp_competition_config;"
+
+ id |       name       |        start_at        |         end_at         | personal_volume_unit | personal_points_per_unit | referral_volume_unit | referral_points_per_unit | status 
+----+------------------+------------------------+------------------------+----------------------+--------------------------+----------------------+--------------------------+--------
+  1 | Testnet Season 1 | 2025-11-01 00:00:00+00 | 2027-01-01 00:00:00+00 |                 1000 |                       10 |                 1000 |                        2 | active
+(1 row)
+
+vinaysagar ~  $ 
+vinaysagar ~  $ 
+vinaysagar ~  $ 
+vinaysagar ~  $ PGPASSWORD=canton_backend psql -h localhost -p 5436 -U canton_backend -d canton_backend -c "SELECT id, alert_type, severity, left(title,70) AS title, created_at FROM alerts WHERE alert_type LIKE
+  'mp_%' ORDER BY id DESC LIMIT 10;"
+ id |   alert_type    | severity |                                 title                                  |          created_at           
+----+-----------------+----------+------------------------------------------------------------------------+-------------------------------
+ 31 | mp_wash_suspect | warning  | mPoints: possible wash trading by f08258a4-cfd2-4e1c-b4d2-a4ac7afbb332 | 2026-09-11 08:31:58.606079+00
+ 30 | mp_wash_suspect | warning  | mPoints: possible wash trading by f08258a4-cfd2-4e1c-b4d2-a4ac7afbb332 | 2026-09-11 08:31:58.018584+00
+ 29 | mp_wash_suspect | warning  | mPoints: possible wash trading by f08258a4-cfd2-4e1c-b4d2-a4ac7afbb332 | 2026-09-11 08:31:58.017587+00
+ 28 | mp_wash_suspect | warning  | mPoints: possible wash trading by f08258a4-cfd2-4e1c-b4d2-a4ac7afbb332 | 2026-09-11 08:31:58.016304+00
+ 27 | mp_wash_suspect | warning  | mPoints: possible wash trading by f08258a4-cfd2-4e1c-b4d2-a4ac7afbb332 | 2026-09-11 08:31:57.250502+00
+ 26 | mp_wash_suspect | warning  | mPoints: possible wash trading by f5c8df0d-60b2-47ae-bb72-6dd2849194dd | 2026-09-11 08:31:57.249177+00
+ 25 | mp_wash_suspect | warning  | mPoints: possible wash trading by f08258a4-cfd2-4e1c-b4d2-a4ac7afbb332 | 2026-09-11 08:31:57.247824+00
+ 24 | mp_wash_suspect | warning  | mPoints: possible wash trading by f5c8df0d-60b2-47ae-bb72-6dd2849194dd | 2026-09-11 08:31:02.023959+00
+ 23 | mp_wash_suspect | warning  | mPoints: possible wash trading by f2ad15d49f60528bec43f9d466e25ea0::12 | 2026-09-11 08:31:02.022323+00
+ 22 | mp_wash_suspect | warning  | mPoints: possible wash trading by 5d495aae1ae4a14b2129b0e23b48f0ee::12 | 2026-09-11 08:31:02.02031+00
+(10 rows)
+
+vinaysagar ~  $ 
+vinaysagar ~  $ 
+vinaysagar ~  $ 
+vinaysagar ~  $ 
+vinaysagar ~  $ PGPASSWORD=canton_backend psql -h localhost -p 5436 -U canton_backend -d canton_backend -c "SELECT m.account_id, left(m.party_id,44) AS party_id, m.source, l.user_id, l.status, l.attempts,
+  l.last_checked_at FROM mp_identity_lookups l LEFT JOIN mp_account_party_map m ON m.account_id = l.account_id ORDER BY l.status, l.account_id::int;"
+ account_id |                   party_id                   |    source    | user_id |  status  | attempts |        last_checked_at        
+------------+----------------------------------------------+--------------+---------+----------+----------+-------------------------------
+            |                                              |              | 27      | no_party |        1 | 2026-09-11 08:31:00.85752+00
+            |                                              |              | 29      | no_party |        1 | 2026-09-11 08:31:00.743302+00
+            |                                              |              | 30      | no_party |        1 | 2026-09-11 08:31:00.813253+00
+            |                                              |              | 35      | no_party |        1 | 2026-09-11 08:31:00.9273+00
+            |                                              |              | 38      | no_party |        1 | 2026-09-11 08:31:00.813766+00
+            |                                              |              | 39      | no_party |        1 | 2026-09-11 08:31:00.883205+00
+            |                                              |              | 45      | no_party |        1 | 2026-09-11 08:31:00.688632+00
+            |                                              |              | 46      | no_party |        1 | 2026-09-11 08:31:00.865152+00
+            |                                              |              | 47      | no_party |        1 | 2026-09-11 08:31:00.749264+00
+            |                                              |              | 49      | no_party |        1 | 2026-09-11 08:31:00.898285+00
+            |                                              |              | 50      | no_party |        1 | 2026-09-11 08:31:00.94416+00
+            |                                              |              | 54      | no_party |        1 | 2026-09-11 08:31:00.834129+00
+            |                                              |              | 56      | no_party |        1 | 2026-09-11 08:31:00.751678+00
+            |                                              |              | 57      | no_party |        1 | 2026-09-11 08:31:00.620016+00
+            |                                              |              | 61      | no_party |        1 | 2026-09-11 08:31:00.450797+00
+            |                                              |              | 62      | no_party |        1 | 2026-09-11 08:31:00.911154+00
+            |                                              |              | 63      | no_party |        1 | 2026-09-11 08:31:00.924637+00
+            |                                              |              | 64      | no_party |        1 | 2026-09-11 08:31:00.400891+00
+            |                                              |              | 65      | no_party |        1 | 2026-09-11 08:31:00.666704+00
+            |                                              |              | 66      | no_party |        1 | 2026-09-11 08:31:00.51779+00
+            |                                              |              | 68      | no_party |        1 | 2026-09-11 08:31:00.450187+00
+            |                                              |              | 69      | no_party |        1 | 2026-09-11 08:31:00.774775+00
+            |                                              |              | 70      | no_party |        1 | 2026-09-11 08:31:00.392631+00
+            |                                              |              | 73      | no_party |        1 | 2026-09-11 08:31:00.792464+00
+            |                                              |              | 75      | no_party |        1 | 2026-09-11 08:31:00.721844+00
+ 74         | alex::1220327e3eff51506a46b72ae1ec0c05471754 | identity_api | 82      | resolved |        1 | 2026-09-11 08:31:00.522121+00
+ 75         | roasted-cashew::1220327e3eff51506a46b72ae1ec | identity_api | 83      | resolved |        1 | 2026-09-11 08:31:00.665028+00
+ 76         | neeraj::1220327e3eff51506a46b72ae1ec0c054717 | identity_api | 84      | resolved |        1 | 2026-09-11 08:31:00.876114+00
+ 77         | 1f55c3abfe52a505fce051ad0557ff8a::122061b534 | identity_api | 85      | resolved |        1 | 2026-09-11 08:31:01.765258+00
+ 79         | 5d495aae1ae4a14b2129b0e23b48f0ee::12205831f9 | identity_api | 87      | resolved |        1 | 2026-09-11 08:31:01.966509+00
+ 80         | 51e524c75258d896275eced13387212d::1220415518 | identity_api | 88      | resolved |        1 | 2026-09-11 08:31:01.812871+00
+ 82         | f5c8df0d-60b2-47ae-bb72-6dd2849194dd::122031 | identity_api | 90      | resolved |        1 | 2026-09-11 08:31:01.983244+00
+ 83         | f2ad15d49f60528bec43f9d466e25ea0::1220f14438 | identity_api | 91      | resolved |        1 | 2026-09-11 08:31:01.720323+00
+ 84         | c61ccdd29560131bf9f3cfcfdd5a10c7::1220147e78 | identity_api | 92      | resolved |        1 | 2026-09-11 08:31:01.665831+00
+ 86         | 0b7ad4c9-f0a4-46b6-9981-91bac0dbeebd::122031 | identity_api | 94      | resolved |        1 | 2026-09-11 08:31:01.985345+00
+ 88         | f08258a4-cfd2-4e1c-b4d2-a4ac7afbb332::122001 | identity_api | 96      | resolved |        1 | 2026-09-11 08:31:57.140774+00
+ 91         | 28435585-1a55-44e1-b816-15dddb15a00b::122001 | identity_api | 99      | resolved |        1 | 2026-09-11 08:31:57.128027+00
+ 97         | d7a69cb0705dbc8f61929dd89db55083::1220475364 | identity_api | 105     | resolved |        1 | 2026-09-11 08:31:57.909384+00
+ 98         | 08e1a9356d378ceaf0a8063c7cb12fb9::1220cbfd36 | identity_api | 106     | resolved |        1 | 2026-09-11 08:31:57.917765+00
+(39 rows)
+
+vinaysagar ~  $ 

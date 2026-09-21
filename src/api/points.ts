@@ -26,27 +26,21 @@ import { requireAuth, type AuthenticatedRequest } from '../auth.js';
 import { getPool } from '../db/pool.js';
 import { getOrCreateCode } from '../referral/codes.js';
 import { referralLink } from '../referral/service.js';
+import { displayConfig, type DisplayConfig } from '../db/mpointsConfig.js';
 
 const router = Router();
 
 // ─── Shared helpers ───────────────────────────────────────────────────────
 
-interface ActiveConfig { id: number; name: string | null; startAt: Date; endAt: Date }
 type DataStatus = 'complete' | 'provisional';
 
 const round2 = (x: number) => Math.round(x * 100) / 100;
 
-async function activeConfig(pool: Pool): Promise<ActiveConfig | null> {
-  const r = await pool.query<{ id: string; name: string | null; start_at: Date; end_at: Date }>(
-    `SELECT id, name, start_at, end_at FROM mp_competition_config
-      WHERE status = 'active' ORDER BY id DESC LIMIT 1`,
-  );
-  const row = r.rows[0];
-  return row ? { id: Number(row.id), name: row.name, startAt: row.start_at, endAt: row.end_at } : null;
-}
-
-const competitionJson = (c: ActiveConfig) => ({
-  id: c.id, name: c.name, startAt: c.startAt.toISOString(), endAt: c.endAt.toISOString(),
+// `active` in every response = the shown competition is RUNNING now. Between
+// seasons the last ended one is still shown (active: false, phase: 'ended').
+const activeConfig = displayConfig;
+const competitionJson = (c: DisplayConfig) => ({
+  id: c.id, name: c.name, startAt: c.startAt.toISOString(), endAt: c.endAt.toISOString(), phase: c.phase, settled: c.settled,
 });
 
 /** 'provisional' while the trade sync has never caught up or work is still queued. */
@@ -118,7 +112,7 @@ router.get('/points/me', requireAuth, wrap(async (req, res) => {
   }
 
   res.json({
-    active: true,
+    active: cfg.phase === 'running',
     competition: competitionJson(cfg),
     totalPoints: round2(totalPoints),
     personalPoints: round2(bySource.trade_personal?.points ?? 0),
@@ -141,13 +135,13 @@ router.get('/points/me/daily', requireAuth, wrap(async (req, res) => {
   const cfg = await activeConfig(pool);
   if (!cfg) return res.json({ active: false, competition: null, days: [], dataStatus: 'no_active_competition' });
 
+  // `finalized` is per competition: the points rows themselves carry the stamp.
   const rows = await pool.query<{ day: string; personal: string; referral: string; finalized: boolean }>(
     `SELECT d.day::text AS day,
             COALESCE(SUM(d.points) FILTER (WHERE d.source = 'trade_personal'), 0)::text AS personal,
             COALESCE(SUM(d.points) FILTER (WHERE d.source = 'trade_referral'), 0)::text AS referral,
-            COALESCE(BOOL_OR(v.finalized_at IS NOT NULL), FALSE) AS finalized
+            COALESCE(BOOL_AND(d.finalized_at IS NOT NULL), FALSE) AS finalized
        FROM mp_points_daily d
-       LEFT JOIN mp_daily_user_volume v ON v.party_id = d.party_id AND v.day = d.day
       WHERE d.party_id = $1 AND d.config_id = $2
       GROUP BY d.day
       ORDER BY d.day`,
@@ -155,7 +149,7 @@ router.get('/points/me/daily', requireAuth, wrap(async (req, res) => {
   );
 
   res.json({
-    active: true,
+    active: cfg.phase === 'running',
     competition: competitionJson(cfg),
     days: rows.rows.map((r) => ({
       day: r.day, personal: round2(Number(r.personal)), referral: round2(Number(r.referral)), finalized: r.finalized,
@@ -244,7 +238,7 @@ router.get('/points/leaderboard', requireAuth, wrap(async (req, res) => {
   }
 
   res.json({
-    active: true,
+    active: cfg.phase === 'running',
     competition: competitionJson(cfg),
     rows,
     me,

@@ -8,7 +8,8 @@
  */
 
 import type { Pool, PoolClient } from 'pg';
-import { REFERRAL_PROMPT_HOURS, REFERRAL_LINK_BASE } from '../config.js';
+import { DISPLAY_CONFIG_SQL } from '../db/mpointsConfig.js';
+import { REFERRAL_BIND_WINDOW_HOURS, REFERRAL_LINK_BASE } from '../config.js';
 import { isWellFormedCode, normalizeCode } from './codes.js';
 
 type Db = Pool | PoolClient;
@@ -235,7 +236,7 @@ export async function getSummary(db: Db, partyId: string): Promise<ReferralSumma
   // competition is active, so the UI keeps rendering "—" rather than "0".
   try {
     const mp = await db.query<{ volume: string; points: string; traded: string }>(
-      `WITH cfg AS (SELECT id, start_at, end_at FROM mp_competition_config WHERE status = 'active' ORDER BY id DESC LIMIT 1)
+      `WITH cfg AS (${DISPLAY_CONFIG_SQL})
        SELECT COALESCE(t.total_volume, 0)::text AS volume,
               COALESCE(t.total_points, 0)::text AS points,
               (SELECT COUNT(DISTINCT a.referee_party_id)
