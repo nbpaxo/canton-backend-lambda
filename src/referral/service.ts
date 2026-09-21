@@ -9,7 +9,7 @@
 
 import type { Pool, PoolClient } from 'pg';
 import { DISPLAY_CONFIG_SQL } from '../db/mpointsConfig.js';
-import { REFERRAL_BIND_WINDOW_HOURS, REFERRAL_LINK_BASE } from '../config.js';
+import { REFERRAL_LINK_BASE } from '../config.js';
 import { isWellFormedCode, normalizeCode } from './codes.js';
 
 type Db = Pool | PoolClient;
@@ -119,15 +119,15 @@ export async function getReferralState(
   // Binding is open to everyone, forever, until they use their one chance.
   // The only thing measured against account age is whether we volunteer the
   // modal — see showPrompt.
-  const promptUntil =
-    row.created_at.getTime() + REFERRAL_PROMPT_HOURS * 3_600_000;
+  // const promptUntil =
+  //   row.created_at.getTime() + REFERRAL_PROMPT_HOURS * 3_600_000;
 
   return {
     myCode: row.my_code,
     referredByCode: row.referred_by_code,
     bound,
     canBind: !bound,
-    showPrompt: !bound && promptUntil > Date.now(),
+    showPrompt: false,
   };
 }
 
