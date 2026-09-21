@@ -25,6 +25,7 @@ import {
   PARTIES,
 } from '../config.js';
 import { getActiveProvider } from '../kyc/index.js';
+import { getReferralState } from '../referral/service.js';
 
 const router = Router();
 
@@ -112,11 +113,26 @@ router.get('/me', requireAuth, async (req: Request, res: Response) => {
     emailRequired = false;
   }
 
+  // Referral state drives the first-connect prompt: the app shows it when
+  // `showPrompt` is true. Included here rather than behind its own call
+  // because /me is what the app already hits on load, and a separate request
+  // would race the prompt against first paint.
+  //
+  // `canBind` means "hasn't used their one chance yet" — there is no deadline
+  // on binding. `showPrompt` is the separate, time-limited nag control.
+  const referral = await getReferralState(pool, party);
+
   res.json({
     partyId: party,
     hasEmail,
     emailRequired,
     kyc,
+    referral: {
+      bound: referral.bound,
+      referredByCode: referral.referredByCode,
+      canBind: referral.canBind,
+      showPrompt: referral.showPrompt,
+    },
     instrument: {
       id: INSTRUMENT_ID,
       symbol: INSTRUMENT_SYMBOL,

@@ -92,6 +92,13 @@ export const PARTIES = {
   operator:  process.env.OPERATOR_PARTY_ID   || `mperpoperator::${PARTICIPANT_SUFFIX}`,
   vaultPool: process.env.VAULT_POOL_PARTY_ID || `mperpvaultpool::${PARTICIPANT_SUFFIX}`,
   treasury:  process.env.TREASURY_PARTY_ID   || `mperptreasury::${PARTICIPANT_SUFFIX}`,
+  // Validator/node operator party — the one we nominate to the Canton
+  // Foundation as our featured-app provider. It is the controller of
+  // `FeaturedAppRight_CreateActivityMarker`, so it must appear in `actAs`
+  // on any submission that emits an activity marker. Deliberately NOT the
+  // same party as `operator` (the exchange's own party).
+  // Unset ⇒ activity markers are disabled (see canton-sdk/featuredApp.ts).
+  nodeOperator: process.env.NODE_OPERATOR_PARTY_ID || '',
   // Token issuer = DSO when INSTRUMENT_VARIANT=amulet (devnet default).
   tokenIssuer: process.env.INSTRUMENT_ADMIN_PARTY_ID
     || `DSO::1220be58c29e65de40bf273be1dc2b266d43a9a002ea5b18955aeef7aac881bb471a`,
@@ -331,3 +338,67 @@ export const LOOP_CRED_TTL_MS = process.env.LOOP_CRED_TTL_SEC
 
 /** Freshness demanded for money-moving calls — /withdraw re-signs every time. */
 export const LOOP_WITHDRAW_TTL_MS = Number(process.env.LOOP_WITHDRAW_TTL_SEC ?? 300) * 1000;
+
+
+// ─── Cloudflare Turnstile (signup bot protection) ────────────────────────
+// Guards the two unauthenticated write/oracle endpoints: /validate-invite
+// (which otherwise lets a script enumerate valid invite codes for free) and
+// /signup. The widget mints a single-use token in the browser; we redeem it
+// here against Cloudflare's siteverify API. NEVER verify from the browser.
+//
+// Set TURNSTILE_SECRET_KEY in .env / .env.lambda (both are gitignored — the
+// secret must never be committed). Leaving it unset disables the check, which
+// is what local dev wants; production sets it and the middleware fails closed.
+export const TURNSTILE_SECRET_KEY = process.env.TURNSTILE_SECRET_KEY || '';
+export const TURNSTILE_VERIFY_URL =
+  process.env.TURNSTILE_VERIFY_URL
+  || 'https://challenges.cloudflare.com/turnstile/v0/siteverify';
+
+/**
+ * Hostnames the widget is allowed to have been solved on, comma-separated.
+ *
+ * Cloudflare echoes the solving page's hostname back in the siteverify
+ * response. Checking it is what stops someone embedding our sitekey on their
+ * own page, farming tokens there, and replaying them at our API — `success:
+ * true` alone does not prove the token came from our frontend.
+ *
+ * Deliberately excludes localhost: dev runs with TURNSTILE_SECRET_KEY unset
+ * (check disabled) rather than by widening the production allowlist.
+ */
+export const TURNSTILE_HOSTNAMES = (process.env.TURNSTILE_HOSTNAMES || '')
+  .split(',')
+  .map((h) => h.trim())
+  .filter(Boolean);
+
+/** Whether the Turnstile check is active. Both halves are required. */
+export const TURNSTILE_ENABLED =
+  TURNSTILE_SECRET_KEY !== '' && TURNSTILE_HOSTNAMES.length > 0;
+
+
+// ─── Referrals ───────────────────────────────────────────────────────────
+/**
+ * Generated referral-code length. 7 chars over a 27-symbol alphabet is ~33
+ * bits — far too large to enumerate, and short enough to read out loud.
+ */
+export const REFERRAL_CODE_LENGTH = Number(process.env.REFERRAL_CODE_LENGTH || '7');
+
+/**
+ * How long after account creation the app PROMPTS for a referral code.
+ *
+ * This is a nudge window, NOT a restriction. Any user can attach a referral
+ * code at any time from the referral page, for as long as they haven't got
+ * one — there is no deadline on binding.
+ *
+ * It exists only so the first-connect modal doesn't reappear on every page
+ * load forever for someone who simply doesn't have a code. After this many
+ * hours the modal stops volunteering itself and the referral page remains the
+ * way in.
+ */
+export const REFERRAL_PROMPT_HOURS = Number(
+  process.env.REFERRAL_PROMPT_HOURS || '24',
+);
+
+/** Base URL used to build the shareable referral link (`<base>/?ref=CODE`). */
+export const REFERRAL_LINK_BASE = (
+  process.env.REFERRAL_LINK_BASE || 'https://app.mperps.xyz'
+).replace(/\/+$/, '');
