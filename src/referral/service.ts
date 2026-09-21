@@ -8,7 +8,8 @@
  */
 
 import type { Pool, PoolClient } from 'pg';
-import { REFERRAL_BIND_WINDOW_HOURS, REFERRAL_LINK_BASE } from '../config.js';
+import { DISPLAY_CONFIG_SQL } from '../db/mpointsConfig.js';
+import { REFERRAL_LINK_BASE } from '../config.js';
 import { isWellFormedCode, normalizeCode } from './codes.js';
 
 type Db = Pool | PoolClient;
@@ -17,9 +18,7 @@ type Db = Pool | PoolClient;
 export type BindFailure =
   | 'invalid_code'      // malformed, unknown, or disabled
   | 'self_referral'     // the code belongs to the caller
-  | 'already_bound'     // this user already has a referrer (immutable)
-  | 'window_closed'     // past the post-connect window
-  | 'not_eligible';     // wrong user type for this bind path
+  | 'already_bound';    // this user already has a referrer (immutable)
 
 export type BindResult =
   | { ok: true; code: string; referrerPartyId: string }
@@ -32,10 +31,19 @@ export interface ReferralState {
   referredByCode: string | null;
   /** True once a referrer is attached — permanent. */
   bound: boolean;
-  /** Whether the caller may still attach a code right now. */
+  /**
+   * Whether the caller may attach a code. This is simply "not already bound":
+   * there is NO deadline. Both user types can attach a referral code at any
+   * point in their life, exactly once.
+   */
   canBind: boolean;
-  /** When the bind window shuts. Null for users with no window concept. */
-  windowExpiresAt: string | null;
+  /**
+   * Whether the app should actively PROMPT for a code (the first-connect
+   * modal), as opposed to merely allowing one. True only for a still-new,
+   * unbound account — see REFERRAL_PROMPT_HOURS. Purely a nagging control;
+   * POST /referral/bind does not consult it.
+   */
+  showPrompt: boolean;
 }
 
 /** Resolve a raw user-supplied code to its owner. Null when unusable. */
@@ -102,33 +110,24 @@ export async function getReferralState(
       referredByCode: null,
       bound: false,
       canBind: false,
-      windowExpiresAt: null,
+      showPrompt: false,
     };
   }
 
   const bound = row.referred_by_code !== null;
 
-  // Only Loop users have a window; mperps users bind at signup.
-  if (!row.is_external) {
-    return {
-      myCode: row.my_code,
-      referredByCode: row.referred_by_code,
-      bound,
-      canBind: false,
-      windowExpiresAt: null,
-    };
-  }
-
-  const expiresAt = new Date(
-    row.created_at.getTime() + REFERRAL_BIND_WINDOW_HOURS * 3_600_000,
-  );
+  // Binding is open to everyone, forever, until they use their one chance.
+  // The only thing measured against account age is whether we volunteer the
+  // modal — see showPrompt.
+  // const promptUntil =
+  //   row.created_at.getTime() + REFERRAL_PROMPT_HOURS * 3_600_000;
 
   return {
     myCode: row.my_code,
     referredByCode: row.referred_by_code,
     bound,
-    canBind: !bound && expiresAt.getTime() > Date.now(),
-    windowExpiresAt: expiresAt.toISOString(),
+    canBind: !bound,
+    showPrompt: false,
   };
 }
 
@@ -142,16 +141,22 @@ export async function getReferralState(
  * referral, so a race between two concurrent binds ends in a conflict rather
  * than a duplicate row.
  *
- * `source` distinguishes the three call sites: signup (mperps, inside the
- * signup transaction), loop_window (Loop users, window-gated), and admin
- * (the backfill script, which bypasses the window but nothing else).
+ * `source` records how the bind happened: signup (entered on the mperps
+ * signup form, bound inside that transaction), self_service (entered later by
+ * the user themselves, from the referral page or the first-connect modal —
+ * either user type), or admin (the operator script).
+ *
+ * There is no time limit on any of these. The only rules are: the code must
+ * resolve, it must not be the caller's own, and the caller must not already
+ * have a referrer. The primary key on referrals enforces that last one even
+ * if this function is bypassed.
  */
 export async function bindReferral(
   db: Db,
   args: {
     refereePartyId: string;
     rawCode: string;
-    source: 'signup' | 'loop_window' | 'admin';
+    source: 'signup' | 'self_service' | 'admin';
   },
 ): Promise<BindResult> {
   const { refereePartyId, rawCode, source } = args;
@@ -160,16 +165,6 @@ export async function bindReferral(
   if (!target) return { ok: false, reason: 'invalid_code' };
   if (target.ownerPartyId === refereePartyId) {
     return { ok: false, reason: 'self_referral' };
-  }
-
-  // Window + eligibility apply only to the self-service Loop path. `signup`
-  // binds inside a transaction that is creating the user right now, and
-  // `admin` is a deliberate operator override.
-  if (source === 'loop_window') {
-    const state = await getReferralState(db, refereePartyId);
-    if (state.bound) return { ok: false, reason: 'already_bound' };
-    if (state.windowExpiresAt === null) return { ok: false, reason: 'not_eligible' };
-    if (!state.canBind) return { ok: false, reason: 'window_closed' };
   }
 
   // The conflict target is the primary key, so this is the point where
@@ -241,7 +236,7 @@ export async function getSummary(db: Db, partyId: string): Promise<ReferralSumma
   // competition is active, so the UI keeps rendering "—" rather than "0".
   try {
     const mp = await db.query<{ volume: string; points: string; traded: string }>(
-      `WITH cfg AS (SELECT id, start_at, end_at FROM mp_competition_config WHERE status = 'active' ORDER BY id DESC LIMIT 1)
+      `WITH cfg AS (${DISPLAY_CONFIG_SQL})
        SELECT COALESCE(t.total_volume, 0)::text AS volume,
               COALESCE(t.total_points, 0)::text AS points,
               (SELECT COUNT(DISTINCT a.referee_party_id)
@@ -335,13 +330,71 @@ export async function listReferredFriends(
   const hasMore = res.rows.length > limit;
   const page = hasMore ? res.rows.slice(0, limit) : res.rows;
 
+  // Per-friend volume + the points that friend earned this referrer.
+  //
+  // mp_referral_attribution holds the referee's volume per day; summed over
+  // the active competition window it is exactly what that one friend
+  // contributed. Points are then derived with the SAME formula the points
+  // service uses — volume / referral_volume_unit * referral_points_per_unit —
+  // so the per-friend column adds up to the aggregate shown above it rather
+  // than being computed a second, subtly different way.
+  //
+  // Left null (not 0) when the points service isn't provisioned here or no
+  // competition is active, matching getPointsSummary.
+  const contributions = new Map<string, { volume: number; points: number }>();
+  if (page.length > 0) {
+    try {
+      const mp = await db.query<{
+        referee_party_id: string;
+        volume: string;
+        points: string;
+      }>(
+        `WITH cfg AS (
+           SELECT id, start_at, end_at, referral_volume_unit, referral_points_per_unit
+             FROM mp_competition_config
+            WHERE status = 'active'
+            ORDER BY id DESC
+            LIMIT 1
+         )
+         SELECT a.referee_party_id,
+                SUM(a.volume)::text AS volume,
+                (SUM(a.volume) / cfg.referral_volume_unit
+                   * cfg.referral_points_per_unit)::text AS points
+           FROM mp_referral_attribution a
+           CROSS JOIN cfg
+          WHERE a.referrer_party_id = $1
+            AND a.referee_party_id = ANY($2::text[])
+            AND a.day >= (cfg.start_at AT TIME ZONE 'UTC')::date
+            AND a.day <  (cfg.end_at   AT TIME ZONE 'UTC')::date
+          GROUP BY a.referee_party_id, cfg.referral_volume_unit, cfg.referral_points_per_unit`,
+        [partyId, page.map((r) => r.referee_party_id)],
+      );
+      for (const row of mp.rows) {
+        contributions.set(row.referee_party_id, {
+          volume: Math.round(Number(row.volume) * 100) / 100,
+          points: Math.round(Number(row.points) * 100) / 100,
+        });
+      }
+    } catch (err) {
+      if (!/relation "mp_/.test((err as Error).message ?? '')) throw err;
+    }
+  }
+
+  // A friend with an attribution row but no trades shows 0, which is true.
+  // A friend with no row at all under an active competition has contributed
+  // nothing yet — also 0. Only an absent points service yields null.
+  const serviceLive = contributions.size > 0;
+
   return {
-    friends: page.map((r) => ({
-      partyId: r.referee_party_id,
-      joinedAt: r.bound_at.toISOString(),
-      volume: null,
-      points: null,
-    })),
+    friends: page.map((r) => {
+      const c = contributions.get(r.referee_party_id);
+      return {
+        partyId: r.referee_party_id,
+        joinedAt: r.bound_at.toISOString(),
+        volume: c ? c.volume : serviceLive ? 0 : null,
+        points: c ? c.points : serviceLive ? 0 : null,
+      };
+    }),
     nextCursor: hasMore ? page[page.length - 1].bound_at.toISOString() : null,
   };
 }

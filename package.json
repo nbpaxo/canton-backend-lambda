@@ -8,7 +8,7 @@
     "build": "tsc && cp -r src/canton-sdk dist/canton-sdk",
     "start": "node dist/server.js",
     "start:watcher": "tsx --env-file=.env src/workers/depositWatcher.ts",
-    "db:apply": "set -a && . ./.env 2>/dev/null || true && set +a && psql \"${DATABASE_URL:-postgres://canton_backend:canton_backend@localhost:5436/canton_backend}\" -f src/db/schema.sql",
+    "db:apply": "DBURL=\"${DATABASE_URL:-}\"; if [ -f ./.env ]; then set -a; . ./.env; set +a; fi; psql \"${DBURL:-${DATABASE_URL:-postgres://canton_backend:canton_backend@localhost:5436/canton_backend}}\" -v ON_ERROR_STOP=1 -f src/db/schema.sql",
     "deploy": "bash scripts/deploy.sh"
   },
   "dependencies": {

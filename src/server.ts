@@ -114,6 +114,7 @@ app.use('/kyc/email/verify-otp', rateLimit('kyc-otp-verify', 10, 15 * 60_000));
 // marketing push looks like. Brute-force protection for the invite-code
 // oracle belongs at the edge (WAF) and in the code entropy, not here.
 app.use('/me', rateLimit('me', 60, 60_000));
+app.use('/points/me', rateLimit('points-me', 60, 60_000));
 // The only unauthenticated referral route: it answers "is this code real?"
 // so the signup form can validate before an account exists. Capped so the
 // code space can't be swept in bulk.

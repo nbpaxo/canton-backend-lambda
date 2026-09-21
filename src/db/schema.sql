@@ -480,11 +480,18 @@ CREATE TABLE IF NOT EXISTS referrals (
   referrer_party_id TEXT NOT NULL REFERENCES users(party_id),
   code              TEXT NOT NULL REFERENCES referral_codes(code),
   bound_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  -- signup      → mperps user entered it on the signup form
-  -- loop_window → Loop wallet user bound within the post-connect window
-  -- admin       → backfilled by scripts/referral-bind.ts
+  -- How the bind happened. There is NO time limit on any of these — a user
+  -- may attach a referral code at any point, exactly once.
+  --   signup       → entered on the mperps signup form, bound in that txn
+  --   self_service → entered later by the user themselves, from the referral
+  --                  page or the first-connect modal (either user type)
+  --   admin        → set by scripts/referral-admin.ts
+  --   loop_window  → LEGACY. Written while binding was restricted to 24h
+  --                  after a Loop wallet's first connect. Kept so existing
+  --                  rows still validate; nothing writes it any more.
   bind_source       TEXT NOT NULL
-                      CHECK (bind_source IN ('signup', 'loop_window', 'admin')),
+                      CHECK (bind_source IN
+                        ('signup', 'self_service', 'admin', 'loop_window')),
   -- status — whether this referral edge currently counts.
   --
   -- TODAY: actively used, unlike referral_codes.status.
@@ -519,6 +526,30 @@ CREATE TABLE IF NOT EXISTS referrals (
   -- fees paid to us.
   CONSTRAINT referrals_no_self CHECK (referee_party_id <> referrer_party_id)
 );
+-- Keep the bind_source CHECK in sync with the current taxonomy.
+--
+-- Necessary because the CREATE TABLE above is a no-op once the table exists,
+-- so a constraint added there never updates on a database that has already
+-- been applied to — the exact failure this hit when 'self_service' was
+-- introduced and existing databases still rejected it. Same pattern as
+-- failed_withdraw_attempts above.
+DO $$
+DECLARE
+  cname TEXT;
+BEGIN
+  FOR cname IN
+    SELECT conname FROM pg_constraint
+    WHERE conrelid = 'referrals'::regclass
+      AND conname LIKE 'referrals_bind_source_check%'
+  LOOP
+    EXECUTE 'ALTER TABLE referrals DROP CONSTRAINT ' || quote_ident(cname);
+  END LOOP;
+
+  ALTER TABLE referrals
+    ADD CONSTRAINT referrals_bind_source_check
+    CHECK (bind_source IN ('signup', 'self_service', 'admin', 'loop_window'));
+END $$;
+
 -- Drives the referral page's friends list (newest first) and the referral
 -- volume rollup. Partial on active so revoked edges cost nothing to skip.
 CREATE INDEX IF NOT EXISTS referrals_referrer_idx
@@ -526,3 +557,382 @@ CREATE INDEX IF NOT EXISTS referrals_referrer_idx
   WHERE status = 'active';
 CREATE INDEX IF NOT EXISTS referrals_code_idx
   ON referrals (code);
+
+
+-- ============================================================================
+-- mPoints (trading-volume competition) tables.
+-- WRITTEN by canton-mpoints-service (sole writer of mp_*), READ by src/api/points.ts
+-- and referral/service.ts. Lives here so this file is the single schema for the
+-- shared database: one `npm run db:apply` provisions everything.
+-- ============================================================================
+-- ============================================================================
+-- mPoints service schema. Lives in the SHARED canton-backend-lambda Postgres.
+-- Every object is prefixed mp_ ; this service is the sole writer of mp_*.
+-- Idempotent: safe to re-apply (IF NOT EXISTS / DROP+CREATE for triggers).
+-- Reads (never writes): referrals, alerts (insert-only), worker_heartbeats.
+-- ============================================================================
+
+-- ─── Raw trades (durable store; config-independent) ─────────────────────────
+CREATE TABLE IF NOT EXISTS mp_trades (
+  id                     TEXT PRIMARY KEY,           -- exchange trade id
+  account_id             TEXT NOT NULL,              -- raw from the feed
+  party_id               TEXT,                       -- resolved; NULL = not yet resolvable (retried)
+  symbol                 TEXT,
+  side                   TEXT,
+  type                   TEXT,
+  price                  NUMERIC,
+  quantity               NUMERIC,
+  margin_conversion_rate NUMERIC,
+  volume_usdt            NUMERIC(38,6) CHECK (volume_usdt IS NULL OR volume_usdt >= 0),
+  traded_at              TIMESTAMPTZ,                -- NULL when the feed gave no usable date
+  raw                    JSONB NOT NULL,
+  raw_hash               TEXT NOT NULL,              -- sha256(canonical record): detects amendments
+  voided                 BOOLEAN NOT NULL DEFAULT FALSE,
+  suspect                BOOLEAN NOT NULL DEFAULT FALSE,   -- wash-trade heuristic flag (review, not exclusion)
+  aggregated_at          TIMESTAMPTZ,                -- NULL = fetched but not yet counted
+  skip_reason            TEXT,                       -- permanent, un-processable (e.g. missing_trade_date)
+  created_at             TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at             TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+-- Which exchange host a trade came from (audit; the feed lock below prevents mixing).
+ALTER TABLE mp_trades ADD COLUMN IF NOT EXISTS exchange_host TEXT;
+CREATE INDEX IF NOT EXISTS mp_trades_pending_idx   ON mp_trades (created_at) WHERE aggregated_at IS NULL AND skip_reason IS NULL;
+CREATE INDEX IF NOT EXISTS mp_trades_party_time_idx ON mp_trades (party_id, traded_at);
+CREATE INDEX IF NOT EXISTS mp_trades_account_idx   ON mp_trades (account_id);
+CREATE INDEX IF NOT EXISTS mp_trades_traded_at_idx ON mp_trades (traded_at);
+
+-- ─── Sync cursors (one row per feed) ────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS mp_sync_state (
+  sync_key           TEXT PRIMARY KEY,               -- 'trade' | 'identity'
+  next_id            TEXT,
+  last_sync_at       TIMESTAMPTZ,
+  caught_up_at       TIMESTAMPTZ,                    -- last time the cursor reached the end of the feed
+  lag_pages          INT NOT NULL DEFAULT 0,
+  total_synced       BIGINT NOT NULL DEFAULT 0,
+  last_reconciled_at TIMESTAMPTZ,
+  consecutive_failures INT NOT NULL DEFAULT 0,          -- sync ticks failed in a row (0 = healthy)
+  stalled_since      TIMESTAMPTZ,                       -- first failure of the current streak
+  last_error         TEXT,
+  updated_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+INSERT INTO mp_sync_state (sync_key) VALUES ('trade')    ON CONFLICT (sync_key) DO NOTHING;
+INSERT INTO mp_sync_state (sync_key) VALUES ('identity') ON CONFLICT (sync_key) DO NOTHING;
+
+-- ─── accountId ↔ party_id (immutable per account) ───────────────────────────
+CREATE TABLE IF NOT EXISTS mp_account_party_map (
+  account_id    TEXT PRIMARY KEY,
+  party_id      TEXT NOT NULL,
+  source        TEXT NOT NULL CHECK (source IN ('trade_feed', 'identity_api', 'admin')),
+  first_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS mp_account_party_map_party_idx ON mp_account_party_map (party_id);
+
+-- ─── Per-account identity lookups against the exchange
+--     (GET /v1/user-data/party-id?accountId=). Records negative results so
+--     unresolved accounts are retried with backoff, not on every cycle. ─────
+CREATE TABLE IF NOT EXISTS mp_identity_lookups (
+  account_id      TEXT PRIMARY KEY,
+  user_id         TEXT,
+  party_id        TEXT,                           -- NULL for 'no_party' / 'not_found'
+  status          TEXT NOT NULL CHECK (status IN ('resolved', 'no_party', 'not_found', 'error')),
+  attempts        INT NOT NULL DEFAULT 0,
+  last_checked_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  last_error      TEXT
+);
+CREATE INDEX IF NOT EXISTS mp_identity_lookups_retry_idx ON mp_identity_lookups (last_checked_at) WHERE status <> 'resolved';
+
+-- ─── Work queue: (party, day) pairs whose volume/points must be recomputed ──
+CREATE TABLE IF NOT EXISTS mp_dirty_days (
+  party_id    TEXT NOT NULL,
+  day         DATE NOT NULL,
+  reason      TEXT NOT NULL,
+  enqueued_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (party_id, day)
+);
+
+-- ─── Config-independent daily volume ledger (the table canton's referral
+--     schema comment anticipates as daily_user_volume) ─────────────────────
+CREATE TABLE IF NOT EXISTS mp_daily_user_volume (
+  party_id     TEXT NOT NULL,
+  day          DATE NOT NULL,
+  volume       NUMERIC(38,6) NOT NULL DEFAULT 0 CHECK (volume >= 0),
+  trade_count  INT NOT NULL DEFAULT 0,
+  updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (party_id, day)
+);
+-- Finalization is a COMPETITION concept ("config C has settled day D"), so the
+-- stamp lives on the points/attribution rows, never on this calendar ledger.
+
+-- ─── Competition configuration ──────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS mp_competition_config (
+  id                        BIGSERIAL PRIMARY KEY,
+  name                      TEXT,
+  start_at                  TIMESTAMPTZ NOT NULL,
+  end_at                    TIMESTAMPTZ NOT NULL,
+  personal_volume_unit      NUMERIC NOT NULL CHECK (personal_volume_unit > 0),
+  personal_points_per_unit  NUMERIC NOT NULL CHECK (personal_points_per_unit > 0),
+  referral_volume_unit      NUMERIC NOT NULL CHECK (referral_volume_unit > 0),
+  referral_points_per_unit  NUMERIC NOT NULL CHECK (referral_points_per_unit > 0),
+  rules                     JSONB NOT NULL DEFAULT '{}'::jsonb,   -- reserved for future non-trade earners
+  -- 'active' = ENABLED (phase derived from time: scheduled / running / ended);
+  -- 'disabled' = retired. Several enabled configs may coexist (seasons scheduled
+  -- ahead; an ended season keeps settling its own days) — they just can't overlap.
+  status                    TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'disabled')),
+  -- Settlement: once prizes are paid the ranking must not move. After settled_at
+  -- any change to this config's rows is recorded as a HELD adjustment (never
+  -- auto-applied) and alerted, whatever FINALIZE_MODE says.
+  settled_at                TIMESTAMPTZ,
+  settled_by                TEXT,
+  created_at                TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at                TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT mp_cfg_window CHECK (start_at < end_at),
+  -- Competition windows never overlap (no double-earning). Disabled configs
+  -- release their window so a mistaken one can be replaced.
+  CONSTRAINT mp_cfg_no_overlap EXCLUDE USING gist (tstzrange(start_at, end_at, '[)') WITH &&)
+    WHERE (status <> 'disabled')
+);
+-- (mp_cfg_one_active — "exactly one active config" — was dropped: see status comment.)
+
+-- ─── Points: daily per (party, day, config, source) ─────────────────────────
+CREATE TABLE IF NOT EXISTS mp_points_daily (
+  party_id    TEXT NOT NULL,
+  day         DATE NOT NULL,
+  config_id   BIGINT NOT NULL REFERENCES mp_competition_config (id),
+  source      TEXT NOT NULL,                        -- 'trade_personal' | 'trade_referral' | future
+  volume      NUMERIC(38,6),
+  points      NUMERIC(38,6) NOT NULL DEFAULT 0,
+  computed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  -- Set once this row's day is FINALIZE_AFTER_HOURS past its close and no recompute
+  -- is queued for it. Later changes to a stamped row go through mp_points_adjustments.
+  finalized_at TIMESTAMPTZ,
+  PRIMARY KEY (party_id, day, config_id, source)
+);
+CREATE INDEX IF NOT EXISTS mp_points_daily_cfg_idx ON mp_points_daily (config_id, day);
+
+-- ─── Points: running totals per (party, config, source) ─────────────────────
+CREATE TABLE IF NOT EXISTS mp_points_total (
+  party_id     TEXT NOT NULL,
+  config_id    BIGINT NOT NULL REFERENCES mp_competition_config (id),
+  source       TEXT NOT NULL,
+  total_volume NUMERIC(38,6) NOT NULL DEFAULT 0,
+  total_points NUMERIC(38,6) NOT NULL DEFAULT 0,
+  updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (party_id, config_id, source)
+);
+
+-- ─── Referral attribution snapshot: which referrer got a referee's volume on
+--     a given day IN A GIVEN COMPETITION. Scoped by config_id so a later
+--     competition never inherits an earlier one's credit decisions; a stamped
+--     (finalized) row is frozen against silent reassignment. ──────────────────
+CREATE TABLE IF NOT EXISTS mp_referral_attribution (
+  referee_party_id  TEXT NOT NULL,
+  day               DATE NOT NULL,
+  config_id         BIGINT NOT NULL,
+  referrer_party_id TEXT NOT NULL,
+  volume            NUMERIC(38,6) NOT NULL DEFAULT 0,
+  finalized_at      TIMESTAMPTZ,
+  updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (referee_party_id, day, config_id),
+  CONSTRAINT mp_referral_attribution_config_fk FOREIGN KEY (config_id) REFERENCES mp_competition_config (id)
+);
+
+-- ─── Audit of every change to a finalized day ───────────────────────────────
+CREATE TABLE IF NOT EXISTS mp_points_adjustments (
+  id            BIGSERIAL PRIMARY KEY,
+  party_id      TEXT NOT NULL,
+  day           DATE NOT NULL,
+  config_id     BIGINT NOT NULL,
+  source        TEXT NOT NULL,
+  volume_before NUMERIC(38,6),
+  volume_after  NUMERIC(38,6),
+  points_before NUMERIC(38,6),
+  points_after  NUMERIC(38,6),
+  reason        TEXT NOT NULL,
+  trigger_ref   TEXT,
+  applied       BOOLEAN NOT NULL,                    -- false = held for approval (FINALIZE_MODE=hold)
+  applied_at    TIMESTAMPTZ,
+  approved_by   TEXT,
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS mp_points_adjustments_pending_idx ON mp_points_adjustments (created_at) WHERE applied = FALSE;
+
+-- ─── Engine bookkeeping (e.g. which config the engine last backfilled for) ──
+CREATE TABLE IF NOT EXISTS mp_engine_state (
+  key        TEXT PRIMARY KEY,
+  value      JSONB NOT NULL DEFAULT '{}'::jsonb,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- ─── Exclusion list ─────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS mp_excluded_parties (
+  party_id    TEXT PRIMARY KEY,
+  reason      TEXT NOT NULL,
+  excluded_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  excluded_by TEXT NOT NULL,
+  -- An exclusion is a verdict about the PARTY (global, not per competition).
+  -- Lifting it (unexclude) keeps the row for audit: the party earns nothing
+  -- for trades in [excluded_at, lifted_at) and normally outside it.
+  lifted_at   TIMESTAMPTZ,
+  lifted_by   TEXT,
+  CONSTRAINT mp_excluded_parties_lift_check CHECK (lifted_at IS NULL OR lifted_at >= excluded_at)
+);
+
+-- ─── Triggers ───────────────────────────────────────────────────────────────
+CREATE OR REPLACE FUNCTION mp_touch_updated_at() RETURNS trigger AS $$
+BEGIN NEW.updated_at := NOW(); RETURN NEW; END $$ LANGUAGE plpgsql;
+
+-- Config rules/window are immutable once any points reference the config —
+-- with ONE exception: end_at may be moved (earlier OR later) as long as the new
+-- end is now or later: ending a season early, switching to the next one, or
+-- extending after an incident. Past days stay as computed. A settled config
+-- cannot change at all.
+CREATE OR REPLACE FUNCTION mp_cfg_guard_immutable() RETURNS trigger AS $$
+BEGIN
+  IF ROW(NEW.start_at, NEW.end_at, NEW.personal_volume_unit, NEW.personal_points_per_unit,
+         NEW.referral_volume_unit, NEW.referral_points_per_unit, NEW.rules)
+     IS DISTINCT FROM
+     ROW(OLD.start_at, OLD.end_at, OLD.personal_volume_unit, OLD.personal_points_per_unit,
+         OLD.referral_volume_unit, OLD.referral_points_per_unit, OLD.rules)
+  THEN
+    IF EXISTS (SELECT 1 FROM mp_points_daily WHERE config_id = OLD.id) THEN
+      IF ROW(NEW.start_at, NEW.personal_volume_unit, NEW.personal_points_per_unit,
+             NEW.referral_volume_unit, NEW.referral_points_per_unit, NEW.rules)
+         IS NOT DISTINCT FROM
+         ROW(OLD.start_at, OLD.personal_volume_unit, OLD.personal_points_per_unit,
+             OLD.referral_volume_unit, OLD.referral_points_per_unit, OLD.rules)
+         AND NEW.end_at >= NOW() - INTERVAL '1 second'          -- 1s slack for ms-truncated client clocks
+         AND OLD.settled_at IS NULL THEN
+        NULL; -- moving the end (earlier or later) is allowed while unsettled
+      ELSE
+        RAISE EXCEPTION 'mp_competition_config % is immutable: points already computed against it (only end_at may be brought forward to now or later). Disable it and create a new config.', OLD.id
+          USING ERRCODE = 'check_violation';
+      END IF;
+    END IF;
+  END IF;
+  NEW.updated_at := NOW();
+  RETURN NEW;
+END $$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS mp_cfg_guard ON mp_competition_config;
+CREATE TRIGGER mp_cfg_guard BEFORE UPDATE ON mp_competition_config
+  FOR EACH ROW EXECUTE FUNCTION mp_cfg_guard_immutable();
+
+DROP TRIGGER IF EXISTS mp_trades_touch ON mp_trades;
+CREATE TRIGGER mp_trades_touch BEFORE UPDATE ON mp_trades
+  FOR EACH ROW EXECUTE FUNCTION mp_touch_updated_at();
+
+DROP TRIGGER IF EXISTS mp_map_touch ON mp_account_party_map;
+CREATE TRIGGER mp_map_touch BEFORE UPDATE ON mp_account_party_map
+  FOR EACH ROW EXECUTE FUNCTION mp_touch_updated_at();
+
+
+-- ─── mp_* referential integrity ─────────────────────────────────────────────
+-- mp_* is SELF-CONTAINED: its foreign keys only ever point at other mp_* tables.
+-- party_id is an opaque identifier supplied by the exchange; mp_* never
+-- constrains users/referrals, and canton never has to consider mp_* when it
+-- changes its own tables. (The service READS referrals at query time for
+-- referral points; the /points/* API joins to users at query time. Neither is
+-- a schema-level dependency.)
+--
+-- Internal parent→child links, added as idempotent ALTERs so databases created
+-- before this block pick them up:
+--   points_daily / points_total / points_adjustments → competition_config
+--   referral_attribution(referee, day)               → daily_user_volume (the
+--                                                       ledger day it derives from)
+DO $$
+DECLARE
+  old TEXT;
+BEGIN
+  -- Remove the cross-service FKs (mp_* → users) from databases that got them
+  -- before mp_* was made self-contained. No-op elsewhere.
+  FOREACH old IN ARRAY ARRAY[
+    'mp_trades_party_fk', 'mp_account_party_map_party_fk', 'mp_daily_user_volume_party_fk',
+    'mp_dirty_days_party_fk', 'mp_points_daily_party_fk', 'mp_points_total_party_fk',
+    'mp_points_adjustments_party_fk', 'mp_referral_attribution_referee_fk',
+    'mp_referral_attribution_referrer_fk', 'mp_excluded_parties_party_fk'
+  ] LOOP
+    IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = old) THEN
+      EXECUTE format('ALTER TABLE %s DROP CONSTRAINT %I',
+                     (SELECT conrelid::regclass FROM pg_constraint WHERE conname = old), old);
+    END IF;
+  END LOOP;
+
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'mp_points_adjustments_config_fk') THEN
+    ALTER TABLE mp_points_adjustments
+      ADD CONSTRAINT mp_points_adjustments_config_fk FOREIGN KEY (config_id) REFERENCES mp_competition_config(id);
+  END IF;
+
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'mp_referral_attribution_ledger_fk') THEN
+    ALTER TABLE mp_referral_attribution
+      ADD CONSTRAINT mp_referral_attribution_ledger_fk
+      FOREIGN KEY (referee_party_id, day) REFERENCES mp_daily_user_volume(party_id, day) ON DELETE CASCADE;
+  END IF;
+
+  -- A RESOLVED trade's (account_id, party_id) must agree with the account→party
+  -- map. MATCH SIMPLE (the default) exempts rows with a NULL party_id, so held /
+  -- unresolved trades are unaffected; the FK only bites once attribution happens.
+  -- NO ACTION on update/delete is intended: re-keying a mapped account that has
+  -- resolved trades is blocked — a remap moves earned points between people and
+  -- must be an explicit recompute, never an in-place UPDATE.
+  CREATE UNIQUE INDEX IF NOT EXISTS mp_account_party_map_account_party_uidx
+    ON mp_account_party_map (account_id, party_id);
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'mp_trades_account_party_fk') THEN
+    -- Self-healing for databases created before this FK: the map is authoritative.
+    UPDATE mp_trades t SET party_id = m.party_id
+      FROM mp_account_party_map m
+     WHERE m.account_id = t.account_id AND t.party_id IS NOT NULL AND t.party_id IS DISTINCT FROM m.party_id;
+    ALTER TABLE mp_trades
+      ADD CONSTRAINT mp_trades_account_party_fk
+      FOREIGN KEY (account_id, party_id) REFERENCES mp_account_party_map (account_id, party_id);
+  END IF;
+
+  -- Finalization moved from the calendar ledger to the competition-scoped rows;
+  -- referral attribution became per-competition. Migrates databases created
+  -- before that change (no-ops on a fresh one).
+  ALTER TABLE mp_daily_user_volume DROP COLUMN IF EXISTS finalized_at;
+  ALTER TABLE mp_points_daily ADD COLUMN IF NOT EXISTS finalized_at TIMESTAMPTZ;
+  ALTER TABLE mp_referral_attribution ADD COLUMN IF NOT EXISTS config_id BIGINT;
+  ALTER TABLE mp_referral_attribution ADD COLUMN IF NOT EXISTS finalized_at TIMESTAMPTZ;
+  -- legacy rows: attribute to the competition whose window covers the day; drop the rest
+  UPDATE mp_referral_attribution a SET config_id = c.id
+    FROM mp_competition_config c
+   WHERE a.config_id IS NULL AND c.status <> 'disabled'
+     AND a.day >= (c.start_at AT TIME ZONE 'UTC')::date AND a.day < (c.end_at AT TIME ZONE 'UTC')::date;
+  DELETE FROM mp_referral_attribution WHERE config_id IS NULL;
+  ALTER TABLE mp_referral_attribution ALTER COLUMN config_id SET NOT NULL;
+  IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'mp_referral_attribution_pkey')
+     AND NOT EXISTS (SELECT 1 FROM information_schema.key_column_usage
+                      WHERE constraint_name = 'mp_referral_attribution_pkey' AND column_name = 'config_id') THEN
+    ALTER TABLE mp_referral_attribution DROP CONSTRAINT mp_referral_attribution_pkey;
+    ALTER TABLE mp_referral_attribution ADD PRIMARY KEY (referee_party_id, day, config_id);
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'mp_referral_attribution_config_fk') THEN
+    ALTER TABLE mp_referral_attribution
+      ADD CONSTRAINT mp_referral_attribution_config_fk FOREIGN KEY (config_id) REFERENCES mp_competition_config (id);
+  END IF;
+  DROP INDEX IF EXISTS mp_referral_attribution_referrer_idx;
+  CREATE INDEX IF NOT EXISTS mp_referral_attribution_cfg_referrer_idx ON mp_referral_attribution (config_id, referrer_party_id, day);
+
+  -- several enabled configs may coexist (non-overlapping); the one-active index is gone
+  DROP INDEX IF EXISTS mp_cfg_one_active;
+
+  -- sync health + settlement — additive, no-op on a fresh database
+  ALTER TABLE mp_sync_state ADD COLUMN IF NOT EXISTS consecutive_failures INT NOT NULL DEFAULT 0;
+  ALTER TABLE mp_sync_state ADD COLUMN IF NOT EXISTS stalled_since TIMESTAMPTZ;
+  ALTER TABLE mp_sync_state ADD COLUMN IF NOT EXISTS last_error TEXT;
+  ALTER TABLE mp_competition_config ADD COLUMN IF NOT EXISTS settled_at TIMESTAMPTZ;
+  ALTER TABLE mp_competition_config ADD COLUMN IF NOT EXISTS settled_by TEXT;
+
+  -- exclusion lift (unexclude) — additive, no-op on a fresh database
+  ALTER TABLE mp_excluded_parties ADD COLUMN IF NOT EXISTS lifted_at TIMESTAMPTZ;
+  ALTER TABLE mp_excluded_parties ADD COLUMN IF NOT EXISTS lifted_by TEXT;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'mp_excluded_parties_lift_check') THEN
+    ALTER TABLE mp_excluded_parties ADD CONSTRAINT mp_excluded_parties_lift_check CHECK (lifted_at IS NULL OR lifted_at >= excluded_at);
+  END IF;
+
+  -- identity lookup statuses (keeps databases created with an older CHECK in sync)
+  ALTER TABLE mp_identity_lookups DROP CONSTRAINT IF EXISTS mp_identity_lookups_status_check;
+  ALTER TABLE mp_identity_lookups ADD CONSTRAINT mp_identity_lookups_status_check
+    CHECK (status IN ('resolved', 'no_party', 'not_found', 'error'));
+END $$;
